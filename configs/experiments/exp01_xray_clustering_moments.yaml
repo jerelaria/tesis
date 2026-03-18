@@ -1,0 +1,31 @@
+experiment:
+  name: exp01_clustering_moments
+  description: "Unsupervised organ labeling using shape moment features and K-Means clustering"
+
+dataset:
+  name: "xray"
+  extensions: ["png", "jpg"] # file extensions to load
+  max_images: 10 # limit to first 10 images for testing
+
+segmenter:
+  device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50
+
+extractor:
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+
+labeler:
+  algorithm: "kmeans"
+  n_clusters: 6
+  random_state: 42
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+
+cluster_filter:
+  min_image_frequency: 0.3
+  min_avg_labeling_confidence: 0.5
+  min_avg_sam_confidence: 0.6
+
+output:
+  results_dir: "results/exp01"

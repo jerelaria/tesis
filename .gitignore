@@ -1,0 +1,57 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual environment ──────────────────────────────────
+venv/
+.venv/
+env/
+
+# ── Jupyter ──────────────────────────────────────────────
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/
+
+# ── Environment / secrets ────────────────────────────────
+.env
+*.env.*
+
+# ── Data (large datasets, never commit raw medical data) ─
+data/
+
+# ── Model weights (large binaries, use HuggingFace/DVC) ──
+weights/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.bin
+
+# ── Experiment results and outputs ───────────────────────
+results/
+
+# ── Notebook artifact images (auto-generated) ────────────
+notebooks/*.png
+notebooks/*.jpg
+
+# ── OS ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── IDE ──────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+
+# ── Misc ─────────────────────────────────────────────────
+*.log
+tmp/
+.cache/
