@@ -1,0 +1,50 @@
+# ============================================================================
+# configs/test_unsupervised.yaml
+# ============================================================================
+# Test A: Basic unsupervised (baseline). Should match your current pipeline.
+# Expected phases: phase1_segmentation, phase2_clustering, phase5_filtered
+# ============================================================================
+experiment:
+  name: test_unsupervised
+  description: "Baseline unsupervised — grid + kmeans, no refinement"
+ 
+mode: unsupervised
+ 
+dataset:
+  name: "XRayNicoSent/images"
+  extensions: ["png"]
+ 
+segmenter:
+  model: medsam2
+  device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50
+ 
+extractor:
+  method: moments
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+ 
+labeler:
+  algorithm: "kmeans"
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+  kmeans:
+    n_clusters: 6
+    random_state: 42
+  dbscan:
+    eps: 0.191
+    min_samples: 2
+  hdbscan:
+    min_cluster_size: 2
+    min_samples: 1
+ 
+cluster_filter:
+  min_image_frequency: 0.3
+  min_avg_labeling_confidence: 0.5
+  min_avg_sam_confidence: 0.6
+ 
+refinement:
+  enabled: false
+ 
+output:
+  results_dir: "results/test_unsupervised"

@@ -2,6 +2,8 @@ from __future__ import annotations
 import numpy as np
 from typing import List, Tuple, Optional
 
+from project.core.data_types import SegmentedObject
+
 
 # ---------------------------------------------------------------------------
 # Image format conversions
@@ -34,7 +36,6 @@ def mask_to_bbox(mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
     Bounding box of a boolean mask (H, W).
     Returns (x_min, y_min, x_max, y_max) or None if the mask is empty.
     """
-    
     rows = np.any(mask, axis=1)
     cols = np.any(mask, axis=0)
     if not rows.any():
@@ -43,7 +44,7 @@ def mask_to_bbox(mask: np.ndarray) -> Optional[Tuple[int, int, int, int]]:
     x_min, x_max = np.where(cols)[0][[0, -1]]
     return (int(x_min), int(y_min), int(x_max), int(y_max))
 
-# Por si quiero filtrar por área mínima en el futuro
+
 def mask_area(mask: np.ndarray) -> int:
     """Number of True pixels in a boolean mask."""
     return int(mask.sum())
@@ -72,7 +73,6 @@ def nms(
     -------
     Filtered list, sorted by descending score.
     """
-
     if not results:
         return []
 
@@ -86,17 +86,55 @@ def nms(
     return kept
 
 
+def nms_objects(
+    objects: list[SegmentedObject],
+    iou_threshold: float = 0.50,
+) -> list[SegmentedObject]:
+    """
+    Non-Maximum Suppression on a list of SegmentedObjects.
+
+    Sorts by descending confidence and discards any object whose mask IoU
+    with an already accepted object exceeds `iou_threshold`.
+
+    Parameters
+    ----------
+    objects : list[SegmentedObject]
+        Objects to deduplicate. Must have confidence scores.
+    iou_threshold : float
+        Overlap threshold for suppression.
+
+    Returns
+    -------
+    list[SegmentedObject]
+        Deduplicated objects, sorted by descending confidence.
+    """
+    if not objects:
+        return []
+
+    sorted_objs = sorted(
+        objects,
+        key=lambda o: o.confidence if o.confidence is not None else 0.0,
+        reverse=True,
+    )
+    kept: list[SegmentedObject] = []
+
+    for obj in sorted_objs:
+        if not any(mask_iou(obj.mask, k.mask) > iou_threshold for k in kept):
+            kept.append(obj)
+
+    return kept
+
+
 # ---------------------------------------------------------------------------
 # Prompt generation
 # ---------------------------------------------------------------------------
 
 def make_point_grid(h: int, w: int, grid_side: int = 6) -> np.ndarray:
     """
-    Uniform grid of points (col, row) with 10% margin on each edge.
+    Uniform grid of points (col, row) with 2% margin on each edge.
 
-    Returns array of shape (grid_side², 2), dtype float32.
+    Returns array of shape (grid_side^2, 2), dtype float32.
     """
-
     xs = np.linspace(w * 0.02, w * 0.98, grid_side).astype(int)
     ys = np.linspace(h * 0.02, h * 0.98, grid_side).astype(int)
-    return np.array([(x,y) for y in ys for x in xs])
+    return np.array([(x, y) for y in ys for x in xs])

@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Optional
 import numpy as np
 
@@ -39,4 +40,41 @@ class Labeler(ABC):
     @abstractmethod
     def label(self, objects: list[SegmentedObject]) -> list[LabeledObject]:
         """Assign an organ label to each segmented object"""
+        ...
+
+
+class Refiner(ABC):
+    """
+    Abstract base class for retroactive refinement.
+ 
+    A Refiner attempts to recover organs that were missed during initial
+    segmentation by using evidence from other images in the dataset.
+    It operates after clustering and labeling, and produces new objects
+    that inherit cluster labels directly (no re-clustering).
+    """
+ 
+    @abstractmethod
+    def refine(
+        self,
+        objects_by_image: dict[Path, list[SegmentedObject]],
+        labeled_by_image: dict[Path, list[LabeledObject]],
+        reader: ImageReader,
+    ) -> tuple[dict[Path, list[SegmentedObject]], dict[Path, list[LabeledObject]]]:
+        """
+        Attempt to recover missing clusters in each image.
+ 
+        Parameters
+        ----------
+        objects_by_image : dict[Path, list[SegmentedObject]]
+            All segmented objects grouped by image path.
+        labeled_by_image : dict[Path, list[LabeledObject]]
+            All labeled objects grouped by image path.
+        reader : ImageReader
+            Used to reload images from disk for the video predictor.
+ 
+        Returns
+        -------
+        tuple of (updated objects_by_image, updated labeled_by_image)
+            Both dicts are updated in-place and returned for convenience.
+        """
         ...
