@@ -1,0 +1,58 @@
+# ============================================================================
+# fs_iter_1ref.yaml — Few-shot iterative, 1 ref, no refinement
+# ============================================================================
+experiment:
+  name: fs_iter_1ref
+  description: "Few-shot iterative, 1 ref, no refinement"
+
+mode: few_shot
+
+dataset:
+  name: "XRayNicoSent/images"
+  extensions: ["png"]
+  max_images: 100
+
+segmenter:
+  model: medsam2
+  device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50
+
+extractor:
+  method: moments
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+
+labeler:
+  algorithm: "dbscan"
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+  kmeans:
+    n_clusters: 6
+    random_state: 42
+  dbscan:
+    eps: 0.191
+    min_samples: 2
+  hdbscan:
+    min_cluster_size: 2
+    min_samples: 1
+
+cluster_filter:
+  min_image_frequency: 0.3
+  min_avg_labeling_confidence: 0.5
+  min_avg_sam_confidence: 0.6
+
+refinement:
+  enabled: false
+
+few_shot:
+  references_dir: "data/few_shot/xray"
+  propagation_mode: iterative
+  references:
+    - image: "1256842362861431725328351539259305635_u1qifz/image.png"
+      masks:
+        left_lung: "1256842362861431725328351539259305635_u1qifz/lung_1.png"
+        right_lung: "1256842362861431725328351539259305635_u1qifz/lung_2.png"
+        heart: "1256842362861431725328351539259305635_u1qifz/heart_1.png"
+
+output:
+  results_dir: "results/fs_iter_1ref"

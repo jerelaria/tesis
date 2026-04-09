@@ -1,13 +1,8 @@
 # ============================================================================
-# configs/test_fewshot_indep_single.yaml
-# ============================================================================
-# Test C: Few-shot independent with 1 reference image.
-# Expected phases: phase1, phase2, phase3_semantic, phase5_filtered
-# Phase 1 logs should say "Independent (1 refs)" — NO grid.
-# Phase 3 should show cluster_N -> organ_name mapping.
+# fs_indep_1ref.yaml — Few-shot independent, 1 reference, DBSCAN
 # ============================================================================
 experiment:
-  name: test_fewshot_indep_single
+  name: fs_indep_1ref
   description: "Few-shot independent, 1 reference, no refinement"
 
 mode: few_shot
@@ -29,7 +24,7 @@ extractor:
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
 
 labeler:
-  algorithm: "kmeans"
+  algorithm: "dbscan"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
   kmeans:
     n_clusters: 6
@@ -60,4 +55,4 @@ few_shot:
         heart: "1256842362861431725328351539259305635_u1qifz/heart_1.png"
 
 output:
-  results_dir: "results/test_fewshot_indep_single"
+  results_dir: "results/fs_indep_1ref"

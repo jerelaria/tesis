@@ -1,14 +1,9 @@
 # ============================================================================
-# configs/test_fewshot_indep_multi.yaml
-# ============================================================================
-# Test D: Few-shot independent with multiple reference images.
-# Expected: same phases as Test C, but logs show "Independent (K refs)".
-# Compare with Test C to see if more references improve quality.
-# Adjust paths to your actual multi-reference data.
+# fs_indep_4ref.yaml — Few-shot independent, 4 refs, no refinement
 # ============================================================================
 experiment:
-  name: test_fewshot_indep_multi
-  description: "Few-shot independent, multiple references"
+  name: fs_indep_4ref
+  description: "Few-shot independent, 4 refs, no refinement"
 
 mode: few_shot
 
@@ -29,7 +24,7 @@ extractor:
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
 
 labeler:
-  algorithm: "kmeans"
+  algorithm: "dbscan"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
   kmeans:
     n_clusters: 6
@@ -75,4 +70,4 @@ few_shot:
         heart: "104055072637907464008767269203861924017_huh41k/heart_1.png"
 
 output:
-  results_dir: "results/test_fewshot_indep_multi"
+  results_dir: "results/fs_indep_4ref"

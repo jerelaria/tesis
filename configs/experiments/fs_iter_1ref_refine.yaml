@@ -1,14 +1,9 @@
 # ============================================================================
-# configs/test_fewshot_iter_single.yaml
-# ============================================================================
-# Test E: Few-shot iterative with 1 reference image.
-# Expected: same phases as Test C, but Phase 1 logs show
-# "[VIDEO BATCH] N-frame video (1 refs + 5 targets)"
-# Compare phase5 with Test C (independent) — later images may differ.
+# fs_iter_1ref_refine.yaml — Few-shot iterative, 1 ref + refinement
 # ============================================================================
 experiment:
-  name: test_fewshot_iter_single
-  description: "Few-shot iterative, 1 reference"
+  name: fs_iter_1ref_refine
+  description: "Few-shot iterative, 1 ref + refinement"
 
 mode: few_shot
 
@@ -29,7 +24,7 @@ extractor:
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
 
 labeler:
-  algorithm: "kmeans"
+  algorithm: "dbscan"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
   kmeans:
     n_clusters: 6
@@ -47,11 +42,17 @@ cluster_filter:
   min_avg_sam_confidence: 0.6
 
 refinement:
-  enabled: false
+  enabled: true
+  min_cluster_confidence: 0.5
+  min_image_frequency: 0.3
+  mask_selection:
+    sam_score_weight: 0.5
+    min_combined_score: 0.5
+    num_reference_frames: 3
 
 few_shot:
   references_dir: "data/few_shot/xray"
-  propagation_mode: independent
+  propagation_mode: iterative
   references:
     - image: "1256842362861431725328351539259305635_u1qifz/image.png"
       masks:
@@ -59,6 +60,5 @@ few_shot:
         right_lung: "1256842362861431725328351539259305635_u1qifz/lung_2.png"
         heart: "1256842362861431725328351539259305635_u1qifz/heart_1.png"
 
-
 output:
-  results_dir: "results/test_fewshot_iter_single"
+  results_dir: "results/fs_iter_1ref_refine"

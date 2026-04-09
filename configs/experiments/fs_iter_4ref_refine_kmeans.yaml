@@ -1,13 +1,9 @@
 # ============================================================================
-# configs/test_fewshot_indep_refine.yaml
-# ============================================================================
-# Test G: Few-shot independent + refinement.
-# Expected phases: phase1, phase2, phase3_semantic, phase4_refinement, phase5
-# Combines video predictor prompting with retroactive recovery.
+# fs_iter_4ref_refine_kmeans.yaml — Few-shot iterative, 4 refs + refinement, KMeans ablation
 # ============================================================================
 experiment:
-  name: test_fewshot_indep_refine
-  description: "Few-shot independent + multi-reference refinement"
+  name: fs_iter_4ref_refine_kmeans
+  description: "Few-shot iterative, 4 refs + refinement, KMeans ablation"
 
 mode: few_shot
 
@@ -56,7 +52,7 @@ refinement:
 
 few_shot:
   references_dir: "data/few_shot/xray"
-  propagation_mode: independent
+  propagation_mode: iterative
   references:
     - image: "1256842362861431725328351539259305635_u1qifz/image.png"
       masks:
@@ -80,4 +76,4 @@ few_shot:
         heart: "104055072637907464008767269203861924017_huh41k/heart_1.png"
 
 output:
-  results_dir: "results/test_fewshot_indep_refine"
+  results_dir: "results/fs_iter_4ref_refine_kmeans"

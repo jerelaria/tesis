@@ -1,0 +1,54 @@
+# ============================================================================
+# unsup_refine_kmeans.yaml — Unsupervised + refinement (KMeans ablation)
+# ============================================================================
+experiment:
+  name: unsup_refine_kmeans
+  description: "Unsupervised + refinement, KMeans ablation"
+
+mode: unsupervised
+
+dataset:
+  name: "XRayNicoSent/images"
+  extensions: ["png"]
+  max_images: 100
+
+segmenter:
+  model: medsam2
+  device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50
+
+extractor:
+  method: moments
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+
+labeler:
+  algorithm: "kmeans"
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+  kmeans:
+    n_clusters: 6
+    random_state: 42
+  dbscan:
+    eps: 0.191
+    min_samples: 2
+  hdbscan:
+    min_cluster_size: 2
+    min_samples: 1
+
+cluster_filter:
+  min_image_frequency: 0.3
+  min_avg_labeling_confidence: 0.5
+  min_avg_sam_confidence: 0.6
+
+refinement:
+  enabled: true
+  min_cluster_confidence: 0.5
+  min_image_frequency: 0.3
+  mask_selection:
+    sam_score_weight: 0.5
+    min_combined_score: 0.5
+    num_reference_frames: 3
+
+output:
+  results_dir: "results/unsup_refine_kmeans"

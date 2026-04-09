@@ -1,13 +1,9 @@
 # ============================================================================
-# configs/test_fewshot_iter_multi.yaml
-# ============================================================================
-# Test F: Few-shot iterative with multiple references.
-# Expected: "[VIDEO BATCH] N-frame video (K refs + 5 targets)"
-# Compare with Test D (independent multi) and Test E (iterative single).
+# fs_iter_4ref_refine.yaml — Few-shot iterative, 4 refs + refinement
 # ============================================================================
 experiment:
-  name: test_fewshot_iter_multi
-  description: "Few-shot iterative, multiple references"
+  name: fs_iter_4ref_refine
+  description: "Few-shot iterative, 4 refs + refinement"
 
 mode: few_shot
 
@@ -28,7 +24,7 @@ extractor:
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
 
 labeler:
-  algorithm: "kmeans"
+  algorithm: "dbscan"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
   kmeans:
     n_clusters: 6
@@ -46,11 +42,17 @@ cluster_filter:
   min_avg_sam_confidence: 0.6
 
 refinement:
-  enabled: false
+  enabled: true
+  min_cluster_confidence: 0.5
+  min_image_frequency: 0.3
+  mask_selection:
+    sam_score_weight: 0.5
+    min_combined_score: 0.5
+    num_reference_frames: 3
 
 few_shot:
   references_dir: "data/few_shot/xray"
-  propagation_mode: independent
+  propagation_mode: iterative
   references:
     - image: "1256842362861431725328351539259305635_u1qifz/image.png"
       masks:
@@ -72,5 +74,6 @@ few_shot:
         left_lung: "104055072637907464008767269203861924017_huh41k/lung_1.png"
         right_lung: "104055072637907464008767269203861924017_huh41k/lung_2.png"
         heart: "104055072637907464008767269203861924017_huh41k/heart_1.png"
+
 output:
-  results_dir: "results/test_fewshot_iter_multi"
+  results_dir: "results/fs_iter_4ref_refine"

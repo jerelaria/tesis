@@ -1,15 +1,11 @@
 # ============================================================================
-# configs/test_text_guided.yaml
-# ============================================================================
-# Test H: Text-guided with clustering enabled.
-# Expected phases: phase1, phase2_clustering, phase3_filtered
-# Requires MedSAM3 to be set up.
+# unsup_refine.yaml — Unsupervised + refinement (DBSCAN)
 # ============================================================================
 experiment:
-  name: test_text_guided
-  description: "Text-guided with MedSAM3 + clustering validation"
+  name: unsup_refine
+  description: "Unsupervised + multi-reference refinement, DBSCAN"
 
-mode: text_guided
+mode: unsupervised
 
 dataset:
   name: "XRayNicoSent/images"
@@ -17,18 +13,21 @@ dataset:
   max_images: 100
 
 segmenter:
-  model: medsam3
+  model: medsam2
   device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50
 
 extractor:
   method: moments
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
 
 labeler:
-  algorithm: "kmeans"
+  algorithm: "dbscan"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
   kmeans:
-    n_clusters: 4
+    n_clusters: 6
     random_state: 42
   dbscan:
     eps: 0.191
@@ -42,9 +41,14 @@ cluster_filter:
   min_avg_labeling_confidence: 0.5
   min_avg_sam_confidence: 0.6
 
-text_guided:
-  prompts: ["lung", "heart"]
-  clustering_enabled: true
+refinement:
+  enabled: true
+  min_cluster_confidence: 0.5
+  min_image_frequency: 0.3
+  mask_selection:
+    sam_score_weight: 0.5
+    min_combined_score: 0.5
+    num_reference_frames: 3
 
 output:
-  results_dir: "results/test_text_guided"
+  results_dir: "results/unsup_refine"
