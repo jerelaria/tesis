@@ -31,7 +31,7 @@ from project.evaluation.visualizer import (
 )
 
 
-def main(config_path: str):
+def main(config_path: str, output_dir_override: str = None, dataset_override: str = None, max_images_override: int = None):
     with open(config_path) as f:
         cfg = yaml.safe_load(f)
 
@@ -39,12 +39,13 @@ def main(config_path: str):
     print(f"Mode: {mode}")
     print(f"Experiment: {cfg.get('experiment', {}).get('name', 'unnamed')}")
 
+    dataset_name = dataset_override or cfg["dataset"]["name"]
     image_paths = load_image_paths(
-        cfg["dataset"]["name"],
+        dataset_name,
         cfg["dataset"]["extensions"],
     )
 
-    max_images = cfg["dataset"].get("max_images")
+    max_images = max_images_override or cfg["dataset"].get("max_images")
     if max_images is not None:
         image_paths = image_paths[:max_images]
 
@@ -55,7 +56,7 @@ def main(config_path: str):
 
     print(f"Found {len(image_paths)} images.")
 
-    results_dir = Path(cfg["output"]["results_dir"])
+    results_dir = Path(output_dir_override) if output_dir_override else Path(cfg["output"]["results_dir"])
     results_dir.mkdir(parents=True, exist_ok=True)
 
     if mode in ("unsupervised", "few_shot"):
@@ -441,10 +442,22 @@ def _extract_features(objects, extractor) -> list:
     for obj in objects:
         try:
             obj.features = extractor.extract(obj)
+            obj.mask = _keep_largest_component(obj.mask)
             valid.append(obj)
         except ValueError as e:
             print(f"    [SKIP] obj {obj.id[:8]}...: {e}")
     return valid
+
+
+def _keep_largest_component(mask: np.ndarray) -> np.ndarray:
+    """Replace mask with its largest connected component."""
+    from scipy.ndimage import label as cc_label
+    labeled, n = cc_label(mask)
+    if n <= 1:
+        return mask
+    sizes = np.bincount(labeled.ravel())
+    sizes[0] = 0  # ignore background
+    return labeled == sizes.argmax()
 
 def _save_predicted_masks(
     labeled_by_image: dict[Path, list], results_dir: Path,
@@ -516,5 +529,12 @@ def _print_summary(all_objects, labeled_by_image):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--config", required=True)
+    parser.add_argument("--output-dir", default=None,
+                        help="Override output.results_dir from YAML")
+    parser.add_argument("--dataset", default=None,
+                        help="Override dataset.name from YAML")
+    parser.add_argument("--max-images", type=int, default=None,
+                        help="Override dataset.max_images from YAML")
     args = parser.parse_args()
-    main(args.config)
+    main(args.config, output_dir_override=args.output_dir,
+            dataset_override=args.dataset, max_images_override=args.max_images)

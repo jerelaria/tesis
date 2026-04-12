@@ -1,10 +1,10 @@
 # ============================================================================
-# 7. Few-shot independent, 4 refs, no refinement
-# Does more references help? Compare vs config 5 (1 ref).
+# 8. Few-shot independent, 4 refs + refinement
+# Does refinement help few-shot with more references? Compare vs config 7.
 # ============================================================================
 experiment:
-  name: fs_indep_4ref
-  description: "Few-shot independent, 4 references, no refinement"
+  name: fs_indep_4ref_refine
+  description: "Few-shot independent, 4 references + recovery + improvement"
 
 mode: few_shot
 
@@ -39,7 +39,16 @@ cluster_filter:
   dedup_sam_score_weight: 0.2
 
 refinement:
-  enabled: false
+  enabled: true
+  min_cluster_confidence: 0.5
+  min_image_frequency: 0.3
+  mask_selection:
+    sam_score_weight: 0.5
+    min_combined_score: 0.5
+    num_reference_frames: 3
+  improve_existing: true
+  improve_min_combined_score: 1.0
+  improve_sam_score_weight: 0.2
 
 few_shot:
   references_dir: "data/few_shot/xray"
@@ -67,4 +76,4 @@ few_shot:
         heart: "104055072637907464008767269203861924017_huh41k/heart.png"
 
 output:
-  results_dir: "results/fs_indep_4ref"
+  results_dir: "results/fs_indep_4ref_refine"
