@@ -1,9 +1,10 @@
 # ============================================================================
-# fs_iter_4ref.yaml — Few-shot iterative, 4 refs, no refinement
+# 10. Few-shot iterative, 4 refs, no refinement
+# Best iterative config without refinement. Compare vs config 7 (indep 4ref).
 # ============================================================================
 experiment:
   name: fs_iter_4ref
-  description: "Few-shot iterative, 4 refs, no refinement"
+  description: "Few-shot iterative, 4 references, no refinement"
 
 mode: few_shot
 
@@ -24,22 +25,18 @@ extractor:
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
 
 labeler:
-  algorithm: "dbscan"
+  algorithm: "kmeans"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
   kmeans:
-    n_clusters: 6
+    n_clusters: 3
     random_state: 42
-  dbscan:
-    eps: 0.191
-    min_samples: 2
-  hdbscan:
-    min_cluster_size: 2
-    min_samples: 1
 
 cluster_filter:
   min_image_frequency: 0.3
   min_avg_labeling_confidence: 0.5
   min_avg_sam_confidence: 0.6
+  deduplicate_per_image: true
+  dedup_sam_score_weight: 0.2
 
 refinement:
   enabled: false
@@ -50,24 +47,24 @@ few_shot:
   references:
     - image: "1256842362861431725328351539259305635_u1qifz/image.png"
       masks:
-        left_lung: "1256842362861431725328351539259305635_u1qifz/lung_1.png"
-        right_lung: "1256842362861431725328351539259305635_u1qifz/lung_2.png"
-        heart: "1256842362861431725328351539259305635_u1qifz/heart_1.png"
+        left_lung: "1256842362861431725328351539259305635_u1qifz/left_lung.png"
+        right_lung: "1256842362861431725328351539259305635_u1qifz/right_lung.png"
+        heart: "1256842362861431725328351539259305635_u1qifz/heart.png"
     - image: "10155709300728342918543955138521808206_f7cj92/image.png"
       masks:
-        left_lung: "10155709300728342918543955138521808206_f7cj92/lung_1.png"
-        right_lung: "10155709300728342918543955138521808206_f7cj92/lung_2.png"
-        heart: "10155709300728342918543955138521808206_f7cj92/heart_1.png"
+        left_lung: "10155709300728342918543955138521808206_f7cj92/left_lung.png"
+        right_lung: "10155709300728342918543955138521808206_f7cj92/right_lung.png"
+        heart: "10155709300728342918543955138521808206_f7cj92/heart.png"
     - image: "137388819814035428537164273550346941304_uaixht/image.png"
       masks:
-        left_lung: "137388819814035428537164273550346941304_uaixht/lung_1.png"
-        right_lung: "137388819814035428537164273550346941304_uaixht/lung_2.png"
-        heart: "137388819814035428537164273550346941304_uaixht/heart_1.png"
+        left_lung: "137388819814035428537164273550346941304_uaixht/left_lung.png"
+        right_lung: "137388819814035428537164273550346941304_uaixht/right_lung.png"
+        heart: "137388819814035428537164273550346941304_uaixht/heart.png"
     - image: "104055072637907464008767269203861924017_huh41k/image.png"
       masks:
-        left_lung: "104055072637907464008767269203861924017_huh41k/lung_1.png"
-        right_lung: "104055072637907464008767269203861924017_huh41k/lung_2.png"
-        heart: "104055072637907464008767269203861924017_huh41k/heart_1.png"
+        left_lung: "104055072637907464008767269203861924017_huh41k/left_lung.png"
+        right_lung: "104055072637907464008767269203861924017_huh41k/right_lung.png"
+        heart: "104055072637907464008767269203861924017_huh41k/heart.png"
 
 output:
   results_dir: "results/fs_iter_4ref"

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
+from collections import defaultdict
 
 from project.core.data_types import LabeledObject
 
@@ -9,7 +10,8 @@ class ClusterFilterConfig:
     min_image_frequency: float = 0.3    # cluster must appear in at least this fraction of images
     min_avg_labeling_confidence: float = 0.5   # minimum average clustering confidence
     min_avg_sam_confidence: float = 0.75       # minimum average SAM segmentation score
-
+    deduplicate_per_image: bool = False
+    dedup_sam_score_weight: float = 0.5  # alpha for combined score: alpha * sam + (1-alpha) * cluster_conf
 
 class ClusterFilter:
     """
@@ -139,3 +141,78 @@ class ClusterFilter:
             "avg_labeling_confidence": avg_labeling_confidence,
             "avg_sam_confidence": avg_sam_confidence,
         }
+
+
+    # ------------------------------------------------------------------
+    # Per-image deduplication
+    # ------------------------------------------------------------------
+ 
+    def deduplicate_per_image(
+        self, labeled_by_image: dict[Path, list[LabeledObject]]
+    ) -> dict[Path, list[LabeledObject]]:
+        """
+        For each image, if a cluster has multiple non-noise objects, keep only
+        the one with the highest combined score and mark the rest as noise.
+ 
+        This assumes organs are anatomically unique per image (e.g., one heart,
+        one left lung). Should NOT be used for datasets where multiple instances
+        of the same structure are valid (e.g., vertebrae, lesions).
+ 
+        The combined score is:
+            alpha * sam_score + (1 - alpha) * labeling_confidence
+ 
+        Parameters
+        ----------
+        labeled_by_image : dict[Path, list[LabeledObject]]
+            All labeled objects grouped by image path.
+ 
+        Returns
+        -------
+        dict[Path, list[LabeledObject]]
+            Same structure with duplicates marked as noise in-place.
+        """
+        alpha = self.config.dedup_sam_score_weight
+        total_removed = 0
+ 
+        for path, objects in labeled_by_image.items():
+            # Group non-noise objects by cluster id
+            cluster_groups: dict[int, list[LabeledObject]] = defaultdict(list)
+            for obj in objects:
+                if not obj.is_noise:
+                    cluster_groups[obj.organ_id].append(obj)
+ 
+            for cid, group in cluster_groups.items():
+                if len(group) <= 1:
+                    continue
+ 
+                # Sort by combined score descending, keep the best
+                group.sort(
+                    key=lambda o: self._combined_score(o, alpha),
+                    reverse=True,
+                )
+                best = group[0]
+                duplicates = group[1:]
+ 
+                for dup in duplicates:
+                    dup.is_noise = True
+                    total_removed += 1
+ 
+                best_score = self._combined_score(best, alpha)
+                print(
+                    f"  {path.name}: cluster_{cid} had {len(group)} objects, "
+                    f"kept best (score={best_score:.3f}), "
+                    f"marked {len(duplicates)} as noise"
+                )
+ 
+        if total_removed > 0:
+            print(f"  Deduplication: {total_removed} duplicate objects marked as noise")
+        else:
+            print("  Deduplication: no duplicates found")
+ 
+        return labeled_by_image
+ 
+    @staticmethod
+    def _combined_score(obj: LabeledObject, alpha: float) -> float:
+        """Compute alpha * sam_score + (1 - alpha) * labeling_confidence."""
+        sam_score = obj.segmented_object.confidence or 0.0
+        return alpha * sam_score + (1.0 - alpha) * obj.labeling_confidence

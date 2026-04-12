@@ -2,6 +2,9 @@ import numpy as np
 from dataclasses import dataclass, field
 from enum import Enum
 from sklearn.cluster import KMeans, DBSCAN, HDBSCAN
+from sklearn.preprocessing import StandardScaler
+from pathlib import Path
+from sklearn.neighbors import NearestNeighbors
 
 from project.core.interfaces import Labeler
 from project.core.data_types import SegmentedObject, LabeledObject
@@ -85,6 +88,7 @@ class ClusteringLabeler(Labeler):
         self._model = self._build_model()
         self._is_fitted = False
         self._feature_indices = [FEATURE_INDEX[f] for f in config.features]
+        self._scaler = StandardScaler()
 
     @classmethod
     def from_config(cls, yaml_path: str) -> "ClusteringLabeler":
@@ -109,7 +113,7 @@ class ClusteringLabeler(Labeler):
         ValueError
             If any object has no features extracted.
         """
-        X = self._extract_feature_matrix(objects)
+        X = self._extract_feature_matrix(objects, fitting=False)
         cluster_ids = self._model.fit_predict(X)
         print("Unique clusters:", np.unique(cluster_ids))
         print("Noise points:", (cluster_ids == -1).sum())
@@ -179,11 +183,7 @@ class ClusteringLabeler(Labeler):
             )
         raise NotImplementedError(f"Algorithm '{self.config.algorithm}' is not implemented.")
 
-    def _extract_feature_matrix(self, objects: list[SegmentedObject]) -> np.ndarray:
-        """
-        Build a (N, n_selected_features) matrix from the configured feature indices.
-        Raises ValueError if any object has no features loaded.
-        """
+    def _extract_feature_matrix(self, objects: list[SegmentedObject], fitting: bool = False) -> np.ndarray:
         missing = [i for i, obj in enumerate(objects) if obj.features is None]
         if missing:
             raise ValueError(
@@ -192,7 +192,11 @@ class ClusteringLabeler(Labeler):
             )
 
         matrix = np.stack([obj.features for obj in objects])  # (N, 6)
-        return matrix[:, self._feature_indices]               # (N, n_selected)
+        selected = matrix[:, self._feature_indices]           # (N, n_selected)
+
+        if fitting:
+            return self._scaler.fit_transform(selected)
+        return matrix[:, self._feature_indices]  
 
     def _compute_confidences(self, X: np.ndarray, cluster_ids: np.ndarray) -> np.ndarray:
         """Dispatcher: routes to the appropriate confidence computation method."""

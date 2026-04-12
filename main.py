@@ -11,7 +11,7 @@ Few-shot propagation modes:
 - iterative: (K+N)-frame video (K refs + all targets). Memory accumulates.
 
 Usage:
-    python -m project.main --config configs/experiment.yaml
+    python -m main --config configs/experiments/experiment.yaml
 """
 
 import yaml
@@ -207,15 +207,21 @@ def _run_unsupervised_or_fewshot(
     print("\n" + "="*60)
     print("Phase 5: Cluster Filtering")
     print("="*60)
-
+ 
     phase5_dir = results_dir / "phase5_filtered"
     phase5_dir.mkdir(exist_ok=True)
-
+ 
     cluster_filter = ClusterFilter(ClusterFilterConfig(**cfg["cluster_filter"]))
     labeled_by_image = cluster_filter.filter(labeled_by_image)
-
+ 
+    if cfg["cluster_filter"].get("deduplicate_per_image", False):
+        print("\n  Per-image deduplication:")
+        labeled_by_image = cluster_filter.deduplicate_per_image(labeled_by_image)
+ 
     for path, labeled in labeled_by_image.items():
         save_visualization(path, labeled, phase5_dir, suffix="_final")
+
+    _save_predicted_masks(labeled_by_image, results_dir)
 
     _print_summary(all_objects, labeled_by_image)
 
@@ -421,6 +427,8 @@ def _run_text_guided(cfg: dict, image_paths: list[Path], results_dir: Path):
             labeled_by_image[path] = labeled
             save_visualization(path, labeled, final_dir, suffix="_final")
 
+    _save_predicted_masks(labeled_by_image, results_dir)
+
     _print_summary(all_objects, labeled_by_image)
 
 
@@ -438,6 +446,36 @@ def _extract_features(objects, extractor) -> list:
             print(f"    [SKIP] obj {obj.id[:8]}...: {e}")
     return valid
 
+def _save_predicted_masks(
+    labeled_by_image: dict[Path, list], results_dir: Path,
+) -> None:
+    """Save final predicted masks as binary PNGs for evaluation."""
+    from PIL import Image as PILImage
+
+    masks_dir = results_dir / "masks"
+    print(f"\n  Saving predicted masks -> {masks_dir}")
+
+    count = 0
+    for path, labeled in labeled_by_image.items():
+        image_dir = masks_dir / path.stem
+        image_dir.mkdir(parents=True, exist_ok=True)
+
+        # Group objects by organ name to determine if numbering is needed
+        by_name: dict[str, list] = {}
+        for obj in labeled:
+            if obj.is_noise:
+                continue
+            by_name.setdefault(obj.organ_name, []).append(obj)
+
+        for name, objs in by_name.items():
+            for i, obj in enumerate(objs, start=1):
+                # Only add suffix if there are multiple masks with the same name
+                filename = f"{name}_{i}.png" if len(objs) > 1 else f"{name}.png"
+                mask_uint8 = (obj.segmented_object.mask * 255).astype(np.uint8)
+                PILImage.fromarray(mask_uint8, mode="L").save(image_dir / filename)
+                count += 1
+
+    print(f"  Saved {count} masks across {len(labeled_by_image)} images")
 
 def _print_summary(all_objects, labeled_by_image):
     print("\n" + "="*60)

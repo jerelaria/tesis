@@ -1,11 +1,12 @@
 # ============================================================================
-# fs_iter_1ref_refine.yaml — Few-shot iterative, 1 ref + refinement
+# 4. Unsupervised — HDBSCAN + refinement
+# Measures refinement impact on HDBSCAN. Compare vs config 2.
 # ============================================================================
 experiment:
-  name: fs_iter_1ref_refine
-  description: "Few-shot iterative, 1 ref + refinement"
+  name: unsup_hdbscan_refine
+  description: "Unsupervised — HDBSCAN + recovery + improvement"
 
-mode: few_shot
+mode: unsupervised
 
 dataset:
   name: "XRayNicoSent/images"
@@ -24,22 +25,18 @@ extractor:
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
 
 labeler:
-  algorithm: "dbscan"
+  algorithm: "hdbscan"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
-  kmeans:
-    n_clusters: 6
-    random_state: 42
-  dbscan:
-    eps: 0.191
-    min_samples: 2
   hdbscan:
-    min_cluster_size: 2
-    min_samples: 1
+    min_cluster_size: 15
+    min_samples: 5
 
 cluster_filter:
   min_image_frequency: 0.3
   min_avg_labeling_confidence: 0.5
   min_avg_sam_confidence: 0.6
+  deduplicate_per_image: true
+  dedup_sam_score_weight: 0.2
 
 refinement:
   enabled: true
@@ -49,16 +46,9 @@ refinement:
     sam_score_weight: 0.5
     min_combined_score: 0.5
     num_reference_frames: 3
-
-few_shot:
-  references_dir: "data/few_shot/xray"
-  propagation_mode: iterative
-  references:
-    - image: "1256842362861431725328351539259305635_u1qifz/image.png"
-      masks:
-        left_lung: "1256842362861431725328351539259305635_u1qifz/lung_1.png"
-        right_lung: "1256842362861431725328351539259305635_u1qifz/lung_2.png"
-        heart: "1256842362861431725328351539259305635_u1qifz/heart_1.png"
+  improve_existing: true
+  improve_min_combined_score: 1.0
+  improve_sam_score_weight: 0.2
 
 output:
-  results_dir: "results/fs_iter_1ref_refine"
+  results_dir: "results/unsup_hdbscan_refine"
