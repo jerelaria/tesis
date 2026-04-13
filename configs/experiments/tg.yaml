@@ -9,9 +9,7 @@ experiment:
 mode: text_guided
 
 dataset:
-  name: "XRayNicoSent/images"
   extensions: ["png"]
-  max_images: 100
 
 segmenter:
   model: medsam3
@@ -38,6 +36,3 @@ cluster_filter:
 text_guided:
   prompts: ["lung", "heart"]
   clustering_enabled: true
-
-output:
-  results_dir: "results/tg"

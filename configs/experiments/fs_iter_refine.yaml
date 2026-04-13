@@ -1,17 +1,15 @@
 # ============================================================================
-# 6. Few-shot independent, 1 ref + refinement
-# Does refinement help few-shot? Compare vs config 5.
+# 11. Few-shot iterative, 4 refs + refinement
+# Best iterative config. Compare vs config 8 (indep 4ref refine).
 # ============================================================================
 experiment:
-  name: fs_indep_1ref_refine
-  description: "Few-shot independent, 1 ref + recovery + improvement"
+  name: fs_iter_4ref_refine
+  description: "Few-shot iterative, 4 refs + recovery + improvement"
 
 mode: few_shot
 
 dataset:
-  name: "XRayNicoSent/images"
   extensions: ["png"]
-  max_images: 100
 
 segmenter:
   model: medsam2
@@ -28,7 +26,6 @@ labeler:
   algorithm: "kmeans"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
   kmeans:
-    n_clusters: 3
     random_state: 42
 
 cluster_filter:
@@ -51,14 +48,4 @@ refinement:
   improve_sam_score_weight: 0.2
 
 few_shot:
-  references_dir: "data/few_shot/xray"
-  propagation_mode: independent
-  references:
-    - image: "1256842362861431725328351539259305635_u1qifz/image.png"
-      masks:
-        left_lung: "1256842362861431725328351539259305635_u1qifz/left_lung.png"
-        right_lung: "1256842362861431725328351539259305635_u1qifz/right_lung.png"
-        heart: "1256842362861431725328351539259305635_u1qifz/heart.png"
-
-output:
-  results_dir: "results/fs_indep_1ref_refine"
+  propagation_mode: iterative

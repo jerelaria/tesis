@@ -9,9 +9,7 @@ experiment:
 mode: unsupervised
 
 dataset:
-  name: "XRayNicoSent/images"
   extensions: ["png"]
-  max_images: 100
 
 segmenter:
   model: medsam2
@@ -28,8 +26,8 @@ labeler:
   algorithm: "hdbscan"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
   hdbscan:
-    min_cluster_size: 15
-    min_samples: 5
+    min_cluster_size_fraction: 0.3
+    min_samples_fraction: 0.1
 
 cluster_filter:
   min_image_frequency: 0.3
@@ -40,6 +38,3 @@ cluster_filter:
 
 refinement:
   enabled: false
-
-output:
-  results_dir: "results/unsup_hdbscan"

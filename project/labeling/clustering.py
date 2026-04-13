@@ -1,3 +1,14 @@
+"""
+Clustering-based labeling for segmented objects.
+
+Supports KMeans, DBSCAN, and HDBSCAN. HDBSCAN supports adaptive parameters
+computed as fractions of the dataset size for truly unsupervised operation.
+
+Labels are numeric cluster IDs. Noise points (DBSCAN/HDBSCAN) receive
+cluster_id -1 and confidence 0.0. No semantic organ name is assigned
+at this stage.
+"""
+
 import numpy as np
 from dataclasses import dataclass, field
 from enum import Enum
@@ -20,20 +31,62 @@ class ClusteringAlgorithm(Enum):
     DBSCAN = "dbscan"
     HDBSCAN = "hdbscan"
 
+
 @dataclass
 class KMeansConfig:
     n_clusters: int = 2
     random_state: int = 42
+
 
 @dataclass
 class DBSCANConfig:
     eps: float = 0.5
     min_samples: int = 2
 
+
 @dataclass
 class HDBSCANConfig:
-    min_cluster_size: int = 2
-    min_samples: int = 1
+    # Absolute values (used directly if set)
+    min_cluster_size: int | None = None
+    min_samples: int | None = None
+    # Fraction-based values (computed from dataset size at runtime)
+    min_cluster_size_fraction: float | None = None
+    min_samples_fraction: float | None = None
+
+    def resolve(self, num_images: int) -> "HDBSCANConfig":
+        """
+        Compute absolute values from fractions if not explicitly set.
+
+        Fractions are relative to num_images. Absolute values take precedence
+        over fractions when both are specified.
+
+        Parameters
+        ----------
+        num_images : int
+            Number of images in the dataset (not number of objects).
+
+        Returns
+        -------
+        HDBSCANConfig
+            New config with resolved absolute values and fractions set to None.
+        """
+        mcs = self.min_cluster_size
+        ms = self.min_samples
+
+        if mcs is None and self.min_cluster_size_fraction is not None:
+            mcs = max(2, int(self.min_cluster_size_fraction * num_images))
+
+        if ms is None and self.min_samples_fraction is not None:
+            ms = max(1, int(self.min_samples_fraction * num_images))
+
+        # Fallback defaults if nothing was specified
+        if mcs is None:
+            mcs = 2
+        if ms is None:
+            ms = 1
+
+        return HDBSCANConfig(min_cluster_size=mcs, min_samples=ms)
+
 
 @dataclass
 class ClusteringConfig:
@@ -99,6 +152,40 @@ class ClusteringLabeler(Labeler):
             raw = yaml.safe_load(f)
         config = ClusteringConfig(**raw.get("labeler", {}))
         return cls(config)
+
+    # ------------------------------------------------------------------
+    # Adaptive parameter resolution
+    # ------------------------------------------------------------------
+
+    def resolve_adaptive_params(self, num_images: int) -> None:
+        """
+        Resolve fraction-based HDBSCAN parameters using the dataset size.
+
+        Must be called before fit() when using min_cluster_size_fraction
+        or min_samples_fraction. Rebuilds the internal sklearn model with
+        the resolved absolute values.
+
+        No-op if the algorithm is not HDBSCAN or no fractions are configured.
+
+        Parameters
+        ----------
+        num_images : int
+            Number of images in the dataset.
+        """
+        if self.config.algorithm != ClusteringAlgorithm.HDBSCAN:
+            return
+
+        hcfg = self.config.hdbscan
+        if hcfg.min_cluster_size_fraction is None and hcfg.min_samples_fraction is None:
+            return
+
+        resolved = hcfg.resolve(num_images)
+        self.config.hdbscan = resolved
+        self._model = self._build_model()
+
+        print(f"  HDBSCAN adaptive resolution ({num_images} images): "
+              f"min_cluster_size={resolved.min_cluster_size}, "
+              f"min_samples={resolved.min_samples}")
 
     # ------------------------------------------------------------------
     # Labeler interface
@@ -178,9 +265,11 @@ class ClusteringLabeler(Labeler):
                 min_samples=self.config.dbscan.min_samples,
             )
         if self.config.algorithm == ClusteringAlgorithm.HDBSCAN:
+            mcs = self.config.hdbscan.min_cluster_size or 2
+            ms = self.config.hdbscan.min_samples or 1
             return HDBSCAN(
-                min_cluster_size=self.config.hdbscan.min_cluster_size,
-                min_samples=self.config.hdbscan.min_samples,
+                min_cluster_size=mcs,
+                min_samples=ms,
             )
         raise NotImplementedError(f"Algorithm '{self.config.algorithm}' is not implemented.")
 
@@ -206,7 +295,7 @@ class ClusteringLabeler(Labeler):
         if self.config.algorithm == ClusteringAlgorithm.KMEANS:
             return self._confidences_kmeans(X, cluster_ids)
         return self._confidences_density_based(X, cluster_ids)
-    
+
     def _confidences_kmeans(self, X: np.ndarray, cluster_ids: np.ndarray) -> np.ndarray:
         """
         Confidence score in [0, 1] based on distance to assigned centroid

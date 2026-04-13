@@ -9,9 +9,7 @@ experiment:
 mode: unsupervised
 
 dataset:
-  name: "XRayNicoSent/images"
   extensions: ["png"]
-  max_images: 100
 
 segmenter:
   model: medsam2
@@ -49,6 +47,3 @@ refinement:
   improve_existing: true
   improve_min_combined_score: 1.0
   improve_sam_score_weight: 0.2
-
-output:
-  results_dir: "results/unsup_kmeans_refine"
