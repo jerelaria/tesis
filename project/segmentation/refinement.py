@@ -20,7 +20,7 @@ import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
 
-from project.core.data_types import LabeledObject, SegmentedObject
+from project.core.data_types import LabeledObject, SegmentedObject, MedicalImage
 from project.core.interfaces import ImageReader, FeatureExtractor, Refiner
 from project.segmentation.medsam2 import MedSAM2Segmenter
 from project.segmentation.quality import (
@@ -41,7 +41,6 @@ class RefinementConfig:
     improve_existing: bool = False   # Improve existing masks: re-segment objects below this combined score
     improve_min_combined_score: float = 0.6  # objects below this are candidates for improvement
     improve_sam_score_weight: float = 0.5    # alpha for evaluating existing object quality
-
 
     def __post_init__(self):
         if self.mask_selection is None:
@@ -65,11 +64,13 @@ class RetroactiveRefiner(Refiner):
     Parameters
     ----------
     segmenter : MedSAM2Segmenter
-        Provides access to segment_with_multi_reference().
+        Provides access to segment_with_multi_reference() and encode_image().
     extractor : FeatureExtractor
         Used to extract features for recovered objects.
     config : RefinementConfig
         Refinement hyperparameters.
+    extract_embeddings : bool
+        If True, also extract SAM2 embeddings for recovered/improved objects.
     """
 
     def __init__(
@@ -77,10 +78,12 @@ class RetroactiveRefiner(Refiner):
         segmenter: MedSAM2Segmenter,
         extractor: FeatureExtractor,
         config: RefinementConfig,
+        extract_embeddings: bool = False,
     ):
         self.segmenter = segmenter
         self.extractor = extractor
         self.config = config
+        self.extract_embeddings = extract_embeddings
 
     def refine(
         self,
@@ -118,6 +121,13 @@ class RetroactiveRefiner(Refiner):
 
             print(f"  {path.name}: absent clusters = {sorted(absent)}")
 
+            # Load image once per image (reused for all absent clusters)
+            target_image = reader.load(str(path))
+            image_embed = (
+                self.segmenter.encode_image(target_image)
+                if self.extract_embeddings else None
+            )
+
             for cluster_id in sorted(absent):
                 total_attempts += 1
                 recovered = self._recover_cluster(
@@ -131,10 +141,7 @@ class RetroactiveRefiner(Refiner):
                     continue
 
                 # Extract features for the recovered object
-                try:
-                    recovered.features = self.extractor.extract(recovered)
-                except ValueError as e:
-                    print(f"    [SKIP] Recovered object features failed: {e}")
+                if not self._extract_obj_features(recovered, image_embed):
                     continue
 
                 # Create LabeledObject with inherited label
@@ -178,11 +185,46 @@ class RetroactiveRefiner(Refiner):
     # Internal methods
     # ------------------------------------------------------------------
 
+    def _extract_obj_features(
+        self, obj: SegmentedObject, image_embed=None,
+    ) -> bool:
+        """
+        Extract moment features and optionally SAM2 embedding for an object.
+
+        Parameters
+        ----------
+        obj : SegmentedObject
+            Object to extract features for.
+        image_embed : torch.Tensor or None
+            SAM2 encoder output. If provided, embedding is extracted.
+
+        Returns
+        -------
+        bool
+            True if features were extracted successfully, False otherwise.
+        """
+        try:
+            obj.features = self.extractor.extract(obj)
+        except ValueError as e:
+            print(f"    [SKIP] Feature extraction failed: {e}")
+            return False
+
+        if image_embed is not None:
+            from project.feature_extraction.embedding import extract_sam2_embedding
+            try:
+                obj.embedding = extract_sam2_embedding(obj, image_embed)
+            except Exception as e:
+                print(f"    [WARN] Embedding extraction failed: {e}")
+                # Non-fatal: moment features are still available.
+                # Clustering will fail later if embeddings are required.
+
+        return True
+
     def _combined_score(self, obj: LabeledObject, alpha: float) -> float:
         """Compute alpha * sam_score + (1 - alpha) * labeling_confidence."""
         sam_score = obj.segmented_object.confidence or 0.0
         return alpha * sam_score + (1.0 - alpha) * obj.labeling_confidence
- 
+
     def _improve_existing_masks(
         self,
         objects_by_image: dict[Path, list[SegmentedObject]],
@@ -193,35 +235,47 @@ class RetroactiveRefiner(Refiner):
         """
         Step 2: Re-segment low-quality existing objects using multi-reference
         video. If the new mask has a higher combined score, replace the original.
- 
+
         Only considers non-noise objects in good clusters whose combined score
         is below improve_min_combined_score.
- 
+
         Operates in-place on both dicts.
         """
         alpha = self.config.improve_sam_score_weight
         threshold = self.config.improve_min_combined_score
- 
+
         print(f"\n  Step 2: Improving existing masks "
               f"(threshold={threshold}, alpha={alpha})")
- 
+
         total_improved = 0
         total_candidates = 0
- 
-        for path, labeled_objects in list(labeled_by_image.items()):
+
+        # Group candidates by image to avoid reloading/re-encoding per object
+        candidates_by_path: dict[Path, list[LabeledObject]] = {}
+        for path, labeled_objects in labeled_by_image.items():
             for labeled_obj in labeled_objects:
                 if labeled_obj.is_noise:
                     continue
                 if labeled_obj.organ_id not in good_clusters:
                     continue
- 
                 original_score = self._combined_score(labeled_obj, alpha)
                 if original_score >= threshold:
                     continue
- 
+                candidates_by_path.setdefault(path, []).append(labeled_obj)
+
+        for path, candidates in candidates_by_path.items():
+            # Load image and compute embedding once per image
+            target_image = reader.load(str(path))
+            image_embed = (
+                self.segmenter.encode_image(target_image)
+                if self.extract_embeddings else None
+            )
+
+            for labeled_obj in candidates:
                 total_candidates += 1
                 cluster_id = labeled_obj.organ_id
- 
+                original_score = self._combined_score(labeled_obj, alpha)
+
                 # Re-segment using multi-reference video
                 new_obj = self._recover_cluster(
                     cluster_id=cluster_id,
@@ -229,17 +283,14 @@ class RetroactiveRefiner(Refiner):
                     labeled_by_image=labeled_by_image,
                     reader=reader,
                 )
- 
+
                 if new_obj is None:
                     continue
- 
-                # Extract features for the new object
-                try:
-                    new_obj.features = self.extractor.extract(new_obj)
-                except ValueError as e:
-                    print(f"    [SKIP] Improved object features failed: {e}")
+
+                # Extract features (and optionally embedding) for the new object
+                if not self._extract_obj_features(new_obj, image_embed):
                     continue
- 
+
                 # Evaluate new mask quality using SAM confidence only
                 # (labeling_confidence is from clustering, not applicable here)
                 new_sam_score = new_obj.confidence or 0.0
@@ -249,32 +300,32 @@ class RetroactiveRefiner(Refiner):
                     alpha * new_sam_score
                     + (1.0 - alpha) * labeled_obj.labeling_confidence
                 )
- 
+
                 if new_score <= original_score:
                     print(
                         f"    {path.name}: cluster_{cluster_id} kept original "
                         f"(original={original_score:.3f} >= new={new_score:.3f})"
                     )
                     continue
- 
-                # Replace: swap the mask and confidence in the existing objects
+
+                # Replace: swap the mask, confidence, features, and embedding
                 old_seg = labeled_obj.segmented_object
                 old_seg.mask = new_obj.mask
                 old_seg.confidence = new_obj.confidence
                 old_seg.features = new_obj.features
+                old_seg.embedding = new_obj.embedding
                 labeled_obj.method_used = "refinement_improved"
- 
+
                 total_improved += 1
                 print(
                     f"    {path.name}: cluster_{cluster_id} improved "
                     f"(score {original_score:.3f} -> {new_score:.3f})"
                 )
- 
+
         print(
             f"  Improvement complete: {total_improved}/{total_candidates} "
             f"masks improved."
         )
-
 
     def _recover_cluster(
         self,

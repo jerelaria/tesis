@@ -14,10 +14,10 @@ class MedicalImage:
 @dataclass
 class SegmentedObject:
     mask: np.ndarray
-    # bbox: tuple, en caso de querer incluir coordenadas de bounding box (x_min, y_min, x_max, y_max)
     source_image: MedicalImage
     id: str = field(default_factory=lambda: str(uuid.uuid4()))
     features: Optional[np.ndarray] = None
+    embedding: Optional[np.ndarray] = None  # SAM2 encoder embedding (256,)
     confidence: Optional[float] = None
     label: Optional[str] = None  # text prompt that generated this mask
 

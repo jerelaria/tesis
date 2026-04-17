@@ -36,6 +36,7 @@ from project.data_io.utils import load_image_paths
 from project.core.config_utils import apply_config_overrides, save_resolved_config
 from project.segmentation.medsam2 import MedSAM2Segmenter, MedSAM2Config
 from project.feature_extraction.moments import MomentFeatureExtractor
+from project.feature_extraction.embedding import extract_sam2_embedding
 from project.labeling.clustering import ClusteringLabeler, ClusteringConfig
 from project.labeling.clustering_filter import ClusterFilter, ClusterFilterConfig
 from project.evaluation.visualizer import (
@@ -152,13 +153,10 @@ def _exclude_few_shot_images(
     The reference source_path points to data/few_shot/{dataset}/{ref_name}/image.png,
     so we match the dataset image stem against the reference directory name.
     """
-    # Collect all possible identifiers from references
     ref_identifiers = set()
     for ref in references:
         ref_path = Path(ref.source_path)
-        # The reference directory name (e.g., "ref_001")
         ref_identifiers.add(ref_path.parent.name)
-        # Also the image stem itself in case it matches
         ref_identifiers.add(ref_path.stem)
 
     original_count = len(image_paths)
@@ -208,12 +206,26 @@ def _run_unsupervised_or_fewshot(
     seg_cfg.pop("model", None)
     segmenter = MedSAM2Segmenter(MedSAM2Config(**seg_cfg))
 
+    # Check if embedding extraction is enabled in labeler config
+    extract_embeddings = (
+        cfg.get("labeler", {}).get("embedding", {}).get("enabled", False)
+    )
+    if extract_embeddings:
+        print("  Embedding extraction: ENABLED")
+
     # Resolve propagation mode from config
     propagation_mode = "independent"
     if mode == "few_shot":
         fs_cfg = cfg.get("few_shot", {})
         propagation_mode = fs_cfg.get("propagation_mode", "independent")
         print(f"  Propagation mode: {propagation_mode}")
+
+    # Log feature configuration for clarity
+    labeler_features = cfg.get("labeler", {}).get("features", None)
+    if labeler_features is None:
+        print("  Moment features: NONE (embeddings-only mode)")
+    else:
+        print(f"  Moment features: {len(labeler.config.features)} selected")
 
     # ------------------------------------------------------------------
     # Phase 1: Segmentation + Feature Extraction
@@ -228,14 +240,17 @@ def _run_unsupervised_or_fewshot(
     if mode == "unsupervised":
         all_objects, objects_by_image = _phase1_unsupervised(
             image_paths, reader, segmenter, extractor, phase1_dir,
+            extract_embeddings=extract_embeddings,
         )
     elif propagation_mode == "independent":
         all_objects, objects_by_image = _phase1_few_shot_independent(
             image_paths, reader, segmenter, extractor, references, phase1_dir,
+            extract_embeddings=extract_embeddings,
         )
     elif propagation_mode == "iterative":
         all_objects, objects_by_image = _phase1_few_shot_iterative(
             image_paths, reader, segmenter, extractor, references, phase1_dir,
+            extract_embeddings=extract_embeddings,
         )
     else:
         raise ValueError(f"Unknown propagation mode: '{propagation_mode}'")
@@ -299,6 +314,7 @@ def _run_unsupervised_or_fewshot(
             segmenter=segmenter,
             extractor=extractor,
             config=RefinementConfig(**refinement_cfg),
+            extract_embeddings=extract_embeddings,
         )
         objects_by_image, labeled_by_image = refiner.refine(
             objects_by_image, labeled_by_image, reader
@@ -338,23 +354,40 @@ def _run_unsupervised_or_fewshot(
 # PHASE 1 VARIANTS
 # ======================================================================
 
-def _extract_features(objects, extractor):
-    """Extract features and clean mask to largest connected component."""
+def _extract_features(objects, extractor, image_embed=None) -> list:
+    """
+    Extract moment features (and optionally SAM2 embeddings) for each object.
+
+    Parameters
+    ----------
+    objects : list[SegmentedObject]
+        Objects to extract features from.
+    extractor : FeatureExtractor
+        Moment feature extractor.
+    image_embed : torch.Tensor, optional
+        SAM2 image encoder output (1, 256, 64, 64). If provided,
+        embeddings are extracted via masked average pooling per object.
+    """
     valid = []
     for obj in objects:
         if obj.mask is None or not obj.mask.any():
             continue
         try:
-            obj.mask = _keep_largest_component(obj.mask)  # Clean BEFORE features
+            obj.mask = _keep_largest_component(obj.mask)
             obj.features = extractor.extract(obj)
+
+            if image_embed is not None:
+                obj.embedding = extract_sam2_embedding(obj, image_embed)
+
             valid.append(obj)
         except ValueError as e:
-            print(f"    [SKIP] Feature extraction failed: {e}")
+            print(f"    [SKIP] obj {obj.id[:8]}...: {e}")
     return valid
 
 
 def _phase1_unsupervised(
     image_paths, reader, segmenter, extractor, phase1_dir,
+    extract_embeddings=False,
 ):
     """Grid-based segmentation (unsupervised mode)."""
     all_objects = []
@@ -367,7 +400,11 @@ def _phase1_unsupervised(
         grid_objects = segmenter.segment(image)
         print(f"    Grid: {len(grid_objects)} objects")
 
-        valid = _extract_features(grid_objects, extractor)
+        image_embed = (
+            segmenter.encode_image(image) if extract_embeddings else None
+        )
+
+        valid = _extract_features(grid_objects, extractor, image_embed)
         if valid:
             objects_by_image[path] = valid
             all_objects.extend(valid)
@@ -380,6 +417,7 @@ def _phase1_unsupervised(
 
 def _phase1_few_shot_independent(
     image_paths, reader, segmenter, extractor, references, phase1_dir,
+    extract_embeddings=False,
 ):
     """
     Few-shot independent: per-image (K+1)-frame video.
@@ -401,7 +439,11 @@ def _phase1_few_shot_independent(
         print(f"    Independent ({len(references)} refs): "
               f"{len(fs_objects)} objects ({labels})")
 
-        valid = _extract_features(fs_objects, extractor)
+        image_embed = (
+            segmenter.encode_image(image) if extract_embeddings else None
+        )
+
+        valid = _extract_features(fs_objects, extractor, image_embed)
         if valid:
             objects_by_image[path] = valid
             all_objects.extend(valid)
@@ -414,6 +456,7 @@ def _phase1_few_shot_independent(
 
 def _phase1_few_shot_iterative(
     image_paths, reader, segmenter, extractor, references, phase1_dir,
+    extract_embeddings=False,
 ):
     """
     Few-shot iterative: single (K+N)-frame video.
@@ -443,7 +486,12 @@ def _phase1_few_shot_iterative(
         else:
             print(f"    {path.name}: 0 objects")
 
-        valid = _extract_features(fs_objs, extractor)
+        image_embed = (
+            segmenter.encode_image(images_by_path[path])
+            if extract_embeddings else None
+        )
+
+        valid = _extract_features(fs_objs, extractor, image_embed)
         if valid:
             objects_by_image[path] = valid
             all_objects.extend(valid)
@@ -609,6 +657,7 @@ def _save_predicted_masks(
 
 
 def _print_summary(all_objects, labeled_by_image):
+    """Print a summary of segmentation, clustering, and feature statistics."""
     print("\n" + "=" * 60)
     print("Summary")
     print("=" * 60)
@@ -635,13 +684,25 @@ def _print_summary(all_objects, labeled_by_image):
     print(f"  Images: {len(labeled_by_image)}")
     print(f"  Methods: {method_counts}")
 
+    # Moment features summary
     features = [o.features for o in all_objects if o.features is not None]
     if features:
         X = np.stack(features)
-        print(f"\n  Features: {X.shape}")
+        print(f"\n  Moment features: {X.shape}")
         print(f"  Min: {X.min(axis=0)}")
         print(f"  Max: {X.max(axis=0)}")
         print(f"  Std: {X.std(axis=0)}")
+
+    # Embedding summary (separate from moments)
+    embeddings = [o.embedding for o in all_objects if o.embedding is not None]
+    if embeddings:
+        E = np.stack(embeddings)
+        print(f"\n  Embeddings: {E.shape} "
+              f"(mean_norm={np.linalg.norm(E, axis=1).mean():.3f})")
+    elif any(o.embedding is not None for o in all_objects):
+        # Some objects have embeddings, some don't (e.g., after refinement)
+        n_with = sum(1 for o in all_objects if o.embedding is not None)
+        print(f"\n  Embeddings: {n_with}/{len(all_objects)} objects have embeddings")
 
 
 # ======================================================================

@@ -82,6 +82,32 @@ class MedSAM2Segmenter(Segmenter):
         return cls(config)
 
     # ------------------------------------------------------------------
+    # Public: encode image for embedding extraction
+    # ------------------------------------------------------------------
+
+    def encode_image(self, image: MedicalImage) -> torch.Tensor:
+        """
+        Run an image through the Hiera encoder and return the embedding.
+
+        Uses the image predictor (same backbone weights as the video
+        predictor). Safe to call after any segmentation method -- the
+        video predictor state is not affected.
+
+        Parameters
+        ----------
+        image : MedicalImage
+            Image to encode.
+
+        Returns
+        -------
+        torch.Tensor
+            Image embedding of shape (1, 256, 64, 64).
+        """
+        img_uint8 = to_uint8(image.volume)
+        self._predictor.set_image(img_uint8)
+        return self._predictor._features["image_embed"]
+
+    # ------------------------------------------------------------------
     # 1. Grid-based segmentation (unsupervised only)
     # ------------------------------------------------------------------
 
@@ -379,7 +405,7 @@ class MedSAM2Segmenter(Segmenter):
                     continue
                 if len(video_res_masks) == 0:
                     continue
-                
+
                 logits = video_res_masks[0].cpu().numpy().squeeze()
                 binary_mask = logits > 0.0
 
