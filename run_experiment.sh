@@ -14,6 +14,11 @@ set -e
 #   --ref-images name1 ...    Priority reference names for few-shot.
 #                             If fewer than K, remaining are filled
 #                             alphabetically from data/few_shot/{dataset}/.
+#   --fs-configs cfg1 ...     Override the default few-shot config list.
+#                             Useful to run a single baseline as its own
+#                             version without the full ablation suite.
+#   --unsup-configs cfg1 ...  Override the default unsupervised config list.
+#   --tg-configs cfg1 ...     Override the default text-guided config list.
 #   --override KEY=VAL ...    Config overrides forwarded to main.py
 #   --skip-unsup              Skip unsupervised experiments
 #   --skip-fewshot            Skip few-shot experiments
@@ -25,25 +30,21 @@ set -e
 #   # Basic: sweep all configs on one dataset
 #   ./run_all.sh v1 XRayNicoSent/images
 #
-#   # With few-shot K sweep and specific refs
-#   ./run_all.sh v2 XRayNicoSent/images --fs-sizes 1 4 7 10 \
-#       --ref-images ref_001 ref_002 ref_003 ref_004 ref_005 ref_006 ref_007 ref_008 ref_009 ref_010
+#   # Run only the few-shot baseline as its own version
+#   ./run_all.sh v0_baseline_fs XRayNicoSent/images \
+#       --skip-unsup --skip-textguided \
+#       --fs-configs configs/experiments/fs_indep_baseline.yaml \
+#       --fs-sizes 1 5 10
 #
 #   # Quick test with 10 images
 #   ./run_all.sh v_test XRayNicoSent/images --max-images 10 --fs-sizes 1 2
-#
-#   # Multiple datasets
-#   ./run_all.sh v3 XRayNicoSent/images Sunnybrook/images
-#
-#   # With config overrides
-#   ./run_all.sh v4 XRayNicoSent/images --override segmenter.score_threshold=0.6
 #
 # ============================================================================
 
 source /media/apoloml/DATOS_2/Tesis_Cosegmentacion/venv/bin/activate
 export LD_LIBRARY_PATH=/media/apoloml/DATOS_2/Tesis_Cosegmentacion/venv/lib/python3.13/site-packages/nvidia/cu13/lib:$LD_LIBRARY_PATH
 
-# ── Parse arguments ──────────────────────────────────────────────────────────
+# ── Parse version + init ─────────────────────────────────────────────────────
 
 VERSION=${1:?"Usage: ./run_all.sh <version> <dataset1> [dataset2] ... [options]"}
 shift 1
@@ -58,6 +59,30 @@ SKIP_FEWSHOT=false
 SKIP_TEXTGUIDED=false
 SKIP_EVAL=false
 SKIP_PLOTS=false
+
+# ── Config lists (defaults; can be overridden by --*-configs flags) ─────────
+# These MUST be declared BEFORE the arg parser so that --fs-configs (etc.)
+# can override them without being clobbered afterwards.
+
+UNSUPERVISED_CONFIGS=(
+    configs/experiments/unsup_kmeans.yaml
+    configs/experiments/unsup_kmeans_refine.yaml
+    configs/experiments/unsup_hdbscan.yaml
+    configs/experiments/unsup_hdbscan_refine.yaml
+)
+
+FEW_SHOT_CONFIGS=(
+    configs/experiments/fs_indep.yaml
+    configs/experiments/fs_indep_refine.yaml
+    configs/experiments/fs_iter.yaml
+    configs/experiments/fs_iter_refine.yaml
+)
+
+TEXT_GUIDED_CONFIGS=(
+    configs/experiments/tg.yaml
+)
+
+# ── Arg parsing ──────────────────────────────────────────────────────────────
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -83,6 +108,30 @@ while [[ $# -gt 0 ]]; do
             shift
             while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
                 OVERRIDES+=("$1")
+                shift
+            done
+            ;;
+        --fs-configs)
+            shift
+            FEW_SHOT_CONFIGS=()
+            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
+                FEW_SHOT_CONFIGS+=("$1")
+                shift
+            done
+            ;;
+        --unsup-configs)
+            shift
+            UNSUPERVISED_CONFIGS=()
+            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
+                UNSUPERVISED_CONFIGS+=("$1")
+                shift
+            done
+            ;;
+        --tg-configs)
+            shift
+            TEXT_GUIDED_CONFIGS=()
+            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
+                TEXT_GUIDED_CONFIGS+=("$1")
                 shift
             done
             ;;
@@ -124,26 +173,6 @@ if [ ${#FS_SIZES[@]} -eq 0 ]; then
     FS_SIZES=(1 4 7 10)
 fi
 
-# ── Config lists ─────────────────────────────────────────────────────────────
-
-UNSUPERVISED_CONFIGS=(
-    configs/experiments/unsup_kmeans.yaml
-    configs/experiments/unsup_kmeans_refine.yaml
-    configs/experiments/unsup_hdbscan.yaml
-    configs/experiments/unsup_hdbscan_refine.yaml
-)
-
-FEW_SHOT_CONFIGS=(
-    configs/experiments/fs_indep.yaml
-    configs/experiments/fs_indep_refine.yaml
-    configs/experiments/fs_iter.yaml
-    configs/experiments/fs_iter_refine.yaml
-)
-
-TEXT_GUIDED_CONFIGS=(
-    configs/experiments/tg.yaml
-)
-
 # ── Display configuration ───────────────────────────────────────────────────
 
 echo ""
@@ -151,13 +180,16 @@ echo "############################################################"
 echo "  Experiment Suite: ${VERSION}"
 echo "  $(date)"
 echo "############################################################"
-echo "  Datasets:       ${DATASETS[*]}"
-echo "  Max images:     ${MAX_IMAGES:-all}"
-echo "  FS sizes (K):   ${FS_SIZES[*]}"
-echo "  Ref images:     ${REF_IMAGES[*]:-auto-discover}"
-echo "  Overrides:      ${OVERRIDES[*]:-none}"
-echo "  Skip unsup:     ${SKIP_UNSUP}"
-echo "  Skip fewshot:   ${SKIP_FEWSHOT}"
+echo "  Datasets:        ${DATASETS[*]}"
+echo "  Max images:      ${MAX_IMAGES:-all}"
+echo "  FS sizes (K):    ${FS_SIZES[*]}"
+echo "  Ref images:      ${REF_IMAGES[*]:-auto-discover}"
+echo "  Overrides:       ${OVERRIDES[*]:-none}"
+echo "  Unsup configs:   ${UNSUPERVISED_CONFIGS[*]}"
+echo "  FS configs:      ${FEW_SHOT_CONFIGS[*]}"
+echo "  TG configs:      ${TEXT_GUIDED_CONFIGS[*]}"
+echo "  Skip unsup:      ${SKIP_UNSUP}"
+echo "  Skip fewshot:    ${SKIP_FEWSHOT}"
 echo "  Skip textguided: ${SKIP_TEXTGUIDED}"
 echo "############################################################"
 

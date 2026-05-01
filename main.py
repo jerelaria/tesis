@@ -186,21 +186,39 @@ def _run_unsupervised_or_fewshot(
     reader = MedicalImageReader()
     extractor = MomentFeatureExtractor()
 
-    # Infer n_clusters from few-shot reference masks
-    if mode == "few_shot" and references:
-        organ_names = set()
-        for ref in references:
-            organ_names.update(ref.masks.keys())
-        n_clusters = len(organ_names)
-        cfg.setdefault("labeler", {})
-        cfg["labeler"].setdefault("kmeans", {})
-        cfg["labeler"]["kmeans"]["n_clusters"] = n_clusters
-        print(f"  Inferred n_clusters={n_clusters} from references: "
-              f"{sorted(organ_names)}")
+    # Clustering can be disabled in few-shot and unsupervised modes to
+    # benchmark raw MedSAM2 output as a minimal-pipeline baseline.
+    # Mirrors the text_guided.clustering_enabled pattern.
+    clustering_enabled = True
+    if mode == "few_shot":
+        clustering_enabled = cfg.get("few_shot", {}).get(
+            "clustering_enabled", True
+        )
+    elif mode == "unsupervised":
+        clustering_enabled = cfg.get("unsupervised", {}).get(
+            "clustering_enabled", True
+        )
 
-    # Build labeler with adaptive HDBSCAN resolution
-    labeler = ClusteringLabeler(ClusteringConfig(**cfg["labeler"]))
-    labeler.resolve_adaptive_params(num_images)
+    labeler = None
+    if clustering_enabled:
+        # Infer n_clusters from few-shot reference masks
+        if mode == "few_shot" and references:
+            organ_names = set()
+            for ref in references:
+                organ_names.update(ref.masks.keys())
+            n_clusters = len(organ_names)
+            cfg.setdefault("labeler", {})
+            cfg["labeler"].setdefault("kmeans", {})
+            cfg["labeler"]["kmeans"]["n_clusters"] = n_clusters
+            print(f"  Inferred n_clusters={n_clusters} from references: "
+                  f"{sorted(organ_names)}")
+
+        # Build labeler with adaptive HDBSCAN resolution
+        labeler = ClusteringLabeler(ClusteringConfig(**cfg["labeler"]))
+        labeler.resolve_adaptive_params(num_images)
+    else:
+        print("  [BASELINE] clustering_enabled=false -> "
+              "skipping phases 2-5, using MedSAM2 labels directly")
 
     seg_cfg = dict(cfg["segmenter"])
     seg_cfg.pop("model", None)
@@ -256,6 +274,56 @@ def _run_unsupervised_or_fewshot(
         raise ValueError(f"Unknown propagation mode: '{propagation_mode}'")
 
     print(f"\nTotal objects: {len(all_objects)}")
+
+    # ------------------------------------------------------------------
+    # Baseline early-exit: no post-processing, use MedSAM2 labels directly
+    # ------------------------------------------------------------------
+    if not clustering_enabled:
+        from project.core.data_types import LabeledObject
+
+        # Few-shot: use organ names from reference masks (propagated by video
+        # predictor as obj.label). Unsupervised: no labels available, so each
+        # object gets a unique synthetic name (obj_000, obj_001, ...) for
+        # traceability. The hungarian matcher in evaluate.py ignores names
+        # and matches by IoU alone.
+        organ_name_to_id: dict[str, int] = {}
+        if mode == "few_shot" and references is not None:
+            for ref in references:
+                for name in ref.masks:
+                    if name not in organ_name_to_id:
+                        organ_name_to_id[name] = len(organ_name_to_id) + 1
+
+        baseline_tag = (
+            "few_shot_baseline" if mode == "few_shot"
+            else "unsupervised_baseline"
+        )
+
+        labeled_by_image = {}
+        for path, objects in objects_by_image.items():
+            labeled = []
+            for local_idx, obj in enumerate(objects):
+                if mode == "few_shot":
+                    organ_name = obj.label or "unknown"
+                    organ_id = organ_name_to_id.get(obj.label, 0)
+                else:
+                    # Unsupervised: synthesize a unique name per object so
+                    # _save_predicted_masks writes one PNG per mask without
+                    # collisions. Names are purely positional.
+                    organ_name = f"obj_{local_idx:03d}"
+                    organ_id = local_idx
+
+                labeled.append(LabeledObject(
+                    segmented_object=obj,
+                    organ_id=organ_id,
+                    organ_name=organ_name,
+                    labeling_confidence=obj.confidence or 0.0,
+                    method_used=baseline_tag,
+                ))
+            labeled_by_image[path] = labeled
+
+        _save_predicted_masks(labeled_by_image, results_dir)
+        _print_summary(all_objects, labeled_by_image)
+        return
 
     # ------------------------------------------------------------------
     # Phase 2: Clustering

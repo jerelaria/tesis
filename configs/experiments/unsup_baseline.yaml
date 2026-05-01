@@ -1,0 +1,29 @@
+# ============================================================================
+# Unsupervised baseline: raw MedSAM2 grid output, no post-processing.
+# Ablation anchor for the unsupervised axis. Evaluated with hungarian
+# matching: the matcher assigns each GT organ to the predicted mask with
+# highest IoU, regardless of the synthetic obj_XXX names.
+# Compare vs unsup_kmeans, unsup_kmeans_refine, unsup_hdbscan, unsup_hdbscan_refine.
+# ============================================================================
+experiment:
+  name: unsup_baseline
+  description: "Unsupervised grid segmentation, raw MedSAM2 output (no post-processing)"
+
+mode: unsupervised
+
+dataset:
+  extensions: ["png"]
+
+segmenter:
+  model: medsam2
+  device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50
+
+extractor:
+  method: moments
+  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
+
+unsupervised:
+  clustering_enabled: false

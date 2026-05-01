@@ -36,6 +36,7 @@ weights/
 
 # ── Experiment results and outputs ───────────────────────
 results/
+archive/
 
 # ── Notebook artifact images (auto-generated) ────────────
 notebooks/*.png
