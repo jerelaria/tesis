@@ -1,0 +1,37 @@
+# SyntheticV1_easy
+# ------------------
+# Baseline variant for Block 1 (sanity check).
+# Low noise, small jitter, no distractors, no occlusion, no missing organs.
+# Pipeline is expected to score Dice >= 0.95 and F1 >= 0.95 on this variant.
+# Any score below that ceiling points to a method bug, not data difficulty.
+
+name: SyntheticV1_easy
+seed: 42
+
+image:
+  size: 256
+
+structure:
+  n_sets: 20
+  n_instances_per_set: 15
+
+variability:
+  intra_position_std: 0.02
+  intra_scale_std: 0.03
+  intra_rotation_deg_std: 2.0
+  inter_position_std: 0.05
+  inter_scale_std: 0.10
+
+appearance:
+  bg_intensity: 0.10
+  bg_noise_std: 0.02
+  gaussian_blur_sigma: 0.0
+  intensity_jitter_std: 0.05
+
+events:
+  n_distractors_per_image: 0
+  occlusion_prob: 0.0
+  missing_organ_prob: 0.0
+
+few_shot:
+  n_refs: 10

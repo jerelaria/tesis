@@ -383,6 +383,7 @@ def _run_unsupervised_or_fewshot(
             extractor=extractor,
             config=RefinementConfig(**refinement_cfg),
             extract_embeddings=extract_embeddings,
+            debug_dir=phase4_dir,
         )
         objects_by_image, labeled_by_image = refiner.refine(
             objects_by_image, labeled_by_image, reader
@@ -694,8 +695,17 @@ def _keep_largest_component(mask: np.ndarray) -> np.ndarray:
 
 def _save_predicted_masks(
     labeled_by_image: dict[Path, list], results_dir: Path,
+    score_alpha: float = 0.5,
 ) -> None:
-    """Save final predicted masks as binary PNGs for evaluation."""
+    """Save final predicted masks as binary PNGs for evaluation.
+
+    Alongside masks, write a `scores.json` per image with:
+        {filename.png: {"sam": float, "labeling": float, "combined": float}}
+
+    The `combined` score is used by evaluate.py to order predictions for
+    mAP computation. The other two are kept for potential downstream
+    analysis (e.g., recalibration studies).
+    """
     from PIL import Image as PILImage
 
     masks_dir = results_dir / "masks"
@@ -713,13 +723,27 @@ def _save_predicted_masks(
                 continue
             by_name.setdefault(obj.organ_name, []).append(obj)
 
+        scores_payload: dict[str, dict[str, float]] = {}
+
         for name, objs in by_name.items():
             for i, obj in enumerate(objs, start=1):
-                # Only add suffix if there are multiple masks with the same name
                 filename = f"{name}_{i}.png" if len(objs) > 1 else f"{name}.png"
+                # Save mask
                 mask_uint8 = (obj.segmented_object.mask * 255).astype(np.uint8)
                 PILImage.fromarray(mask_uint8, mode="L").save(image_dir / filename)
+                # Compute and record scores
+                sam = float(obj.segmented_object.confidence or 0.0)
+                lab = float(obj.labeling_confidence or 0.0)
+                combined = score_alpha * sam + (1.0 - score_alpha) * lab
+                scores_payload[filename] = {
+                    "sam": sam, "labeling": lab, "combined": combined,
+                }
                 count += 1
+
+        # One scores.json per image
+        if scores_payload:
+            with open(image_dir / "scores.json", "w") as f:
+                json.dump(scores_payload, f, indent=2)
 
     print(f"  Saved {count} masks across {len(labeled_by_image)} images")
 

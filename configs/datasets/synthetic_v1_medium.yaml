@@ -1,0 +1,44 @@
+# SyntheticV1_medium
+# -------------------
+# Block 2: replication of central pipeline findings.
+# Key difference from _easy:
+#   - randomize_quadrant_assignment: true
+#     Forces clustering to use shape features (moments), not position.
+#     The disc can appear in any quadrant across sets; the pipeline must
+#     group all discs together regardless of their spatial location.
+#   - Higher noise and jitter so the baseline does not saturate at 1.0,
+#     leaving measurable room for HDBSCAN+Refine and Iter+Refine to improve.
+# No distractors, no occlusion, no missing organs (isolates the feature
+# space and clustering as the variables under test).
+
+name: SyntheticV1_medium
+seed: 42
+
+image:
+  size: 256
+
+structure:
+  n_sets: 20
+  n_instances_per_set: 15
+  randomize_quadrant_assignment: true   # Option C: shuffle per set
+
+variability:
+  intra_position_std: 0.05
+  intra_scale_std: 0.06
+  intra_rotation_deg_std: 5.0
+  inter_position_std: 0.08
+  inter_scale_std: 0.15
+
+appearance:
+  bg_intensity: 0.10
+  bg_noise_std: 0.08
+  gaussian_blur_sigma: 0.0
+  intensity_jitter_std: 0.10
+
+events:
+  n_distractors_per_image: 0
+  occlusion_prob: 0.0
+  missing_organ_prob: 0.0
+
+few_shot:
+  n_refs: 10

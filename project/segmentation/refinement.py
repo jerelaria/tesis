@@ -17,6 +17,7 @@ Key design decisions:
 """
 
 import numpy as np
+import json
 from pathlib import Path
 from dataclasses import dataclass
 
@@ -79,11 +80,15 @@ class RetroactiveRefiner(Refiner):
         extractor: FeatureExtractor,
         config: RefinementConfig,
         extract_embeddings: bool = False,
+        debug_dir: Path | None = None,
     ):
         self.segmenter = segmenter
         self.extractor = extractor
         self.config = config
         self.extract_embeddings = extract_embeddings
+        self.debug_dir = debug_dir
+        # Per-call records appended by _recover_cluster
+        self._refinement_log: list[dict] = []
 
     def refine(
         self,
@@ -135,6 +140,7 @@ class RetroactiveRefiner(Refiner):
                     target_path=path,
                     labeled_by_image=labeled_by_image,
                     reader=reader,
+                    context="recover",
                 )
 
                 if recovered is None:
@@ -179,6 +185,13 @@ class RetroactiveRefiner(Refiner):
                 objects_by_image, labeled_by_image, good_clusters, reader
             )
 
+        # Dump refinement log
+        if self.debug_dir is not None and self._refinement_log:
+            log_path = self.debug_dir / "refinement_log.json"
+            with open(log_path, "w") as f:
+                json.dump(self._refinement_log, f, indent=2)
+            print(f"\n  Refinement log saved -> {log_path}")
+    
         return objects_by_image, labeled_by_image
 
     # ------------------------------------------------------------------
@@ -234,23 +247,61 @@ class RetroactiveRefiner(Refiner):
     ) -> None:
         """
         Step 2: Re-segment low-quality existing objects using multi-reference
-        video. If the new mask has a higher combined score, replace the original.
-
-        Only considers non-noise objects in good clusters whose combined score
-        is below improve_min_combined_score.
-
-        Operates in-place on both dicts.
+        video. If the new mask has a higher combined score, replace the
+        original.
+ 
+        A snapshot of labeled_by_image is taken before iteration begins.
+        All calls to select_reference_masks use the snapshot, not the live
+        dict. This prevents in-place mask updates from contaminating the
+        reference pool mid-pass (cascade via shared mutable state).
         """
         alpha = self.config.improve_sam_score_weight
         threshold = self.config.improve_min_combined_score
-
+ 
         print(f"\n  Step 2: Improving existing masks "
               f"(threshold={threshold}, alpha={alpha})")
-
+ 
+        # Snapshot: shallow copy of the per-image lists. We only need the
+        # LabeledObject references (which carry the SegmentedObject with its
+        # mask). Since SegmentedObject.mask will be mutated in-place by the
+        # improvement step, we capture the mask arrays as views BEFORE the
+        # loop starts. We store them separately so the snapshot can be passed
+        # to select_reference_masks without reflecting live mutations.
+        #
+        # Implementation: build a parallel dict identical in structure to
+        # labeled_by_image but with each LabeledObject's mask replaced by a
+        # copy captured at this moment. We achieve this by wrapping each
+        # LabeledObject in a lightweight proxy that overrides the mask.
+        #
+        # Simpler equivalent: deepcopy only the masks, then patch them back.
+        # We use a frozen_masks dict: path -> {obj_id -> mask_copy} and
+        # a custom select wrapper. Cleanest approach: copy the mask arrays
+        # into a parallel structure and pass it as reference_source.
+ 
+        # Build snapshot as a dict[Path, list[LabeledObject]] where each
+        # LabeledObject's segmented_object.mask is a copy of the current
+        # mask (not a live reference). We reuse the same LabeledObject
+        # instances but wrap the mask in a copy so mutations don't propagate.
+        import copy
+ 
+        snapshot: dict[Path, list[LabeledObject]] = {}
+        for path, objs in labeled_by_image.items():
+            snapped = []
+            for obj in objs:
+                # Shallow-copy the LabeledObject to avoid sharing state,
+                # then deep-copy only the mask (not the full volume).
+                obj_copy = copy.copy(obj)
+                seg_copy = copy.copy(obj.segmented_object)
+                seg_copy.mask = obj.segmented_object.mask.copy()
+                obj_copy.segmented_object = seg_copy
+                snapped.append(obj_copy)
+            snapshot[path] = snapped
+ 
+        # Collect improvement candidates using the live dict for scoring
+        # (we want current scores, not snapshot scores).
         total_improved = 0
         total_candidates = 0
-
-        # Group candidates by image to avoid reloading/re-encoding per object
+ 
         candidates_by_path: dict[Path, list[LabeledObject]] = {}
         for path, labeled_objects in labeled_by_image.items():
             for labeled_obj in labeled_objects:
@@ -262,66 +313,64 @@ class RetroactiveRefiner(Refiner):
                 if original_score >= threshold:
                     continue
                 candidates_by_path.setdefault(path, []).append(labeled_obj)
-
+ 
         for path, candidates in candidates_by_path.items():
-            # Load image and compute embedding once per image
             target_image = reader.load(str(path))
             image_embed = (
                 self.segmenter.encode_image(target_image)
                 if self.extract_embeddings else None
             )
-
+ 
             for labeled_obj in candidates:
                 total_candidates += 1
                 cluster_id = labeled_obj.organ_id
                 original_score = self._combined_score(labeled_obj, alpha)
-
-                # Re-segment using multi-reference video
+ 
+                # Pass snapshot as reference_source so that masks mutated
+                # by earlier iterations in this pass cannot act as
+                # references for later iterations.
                 new_obj = self._recover_cluster(
                     cluster_id=cluster_id,
                     target_path=path,
                     labeled_by_image=labeled_by_image,
                     reader=reader,
+                    context="improve",
+                    reference_source=snapshot,
                 )
-
+ 
                 if new_obj is None:
                     continue
-
-                # Extract features (and optionally embedding) for the new object
+ 
                 if not self._extract_obj_features(new_obj, image_embed):
                     continue
-
-                # Evaluate new mask quality using SAM confidence only
-                # (labeling_confidence is from clustering, not applicable here)
+ 
                 new_sam_score = new_obj.confidence or 0.0
-                # Use original labeling_confidence for comparison since
-                # the cluster assignment hasn't changed
                 new_score = (
                     alpha * new_sam_score
                     + (1.0 - alpha) * labeled_obj.labeling_confidence
                 )
-
+ 
                 if new_score <= original_score:
                     print(
                         f"    {path.name}: cluster_{cluster_id} kept original "
                         f"(original={original_score:.3f} >= new={new_score:.3f})"
                     )
                     continue
-
-                # Replace: swap the mask, confidence, features, and embedding
+ 
+                # Replace mask in the live dict (snapshot is unaffected).
                 old_seg = labeled_obj.segmented_object
                 old_seg.mask = new_obj.mask
                 old_seg.confidence = new_obj.confidence
                 old_seg.features = new_obj.features
                 old_seg.embedding = new_obj.embedding
                 labeled_obj.method_used = "refinement_improved"
-
+ 
                 total_improved += 1
                 print(
                     f"    {path.name}: cluster_{cluster_id} improved "
                     f"(score {original_score:.3f} -> {new_score:.3f})"
                 )
-
+ 
         print(
             f"  Improvement complete: {total_improved}/{total_candidates} "
             f"masks improved."
@@ -333,41 +382,130 @@ class RetroactiveRefiner(Refiner):
         target_path: Path,
         labeled_by_image: dict[Path, list[LabeledObject]],
         reader: ImageReader,
+        context: str = "recover",
+        reference_source: dict[Path, list[LabeledObject]] | None = None,
     ) -> SegmentedObject | None:
         """
         Attempt to recover a single cluster in a target image by building
         a multi-reference video with K best examples from other images.
+ 
+        After propagation, a connected-component filter keeps only the
+        component whose centroid is closest to the mean centroid of the K
+        reference masks, discarding spurious activations on nearby objects.
+ 
+        The `context` parameter ("recover" or "improve") is recorded in the
+        refinement log for post-hoc analysis.
         """
+        # Use reference_source if provided (e.g., a snapshot from improve pass)
+        # so that in-place mutations to labeled_by_image during improvement
+        # do not contaminate the reference pool.
+        _ref_source = reference_source if reference_source is not None \
+            else labeled_by_image
+    
         references = select_reference_masks(
             cluster_id=cluster_id,
-            labeled_by_image=labeled_by_image,
+            labeled_by_image=_ref_source,
             target_path=target_path,
             config=self.config.mask_selection,
         )
-
+ 
         if not references:
             print(f"    No valid references for cluster_{cluster_id}")
+            if hasattr(self, "_refinement_log"):
+                self._refinement_log.append({
+                    "target": target_path.name,
+                    "cluster_id": int(cluster_id),
+                    "context": context,
+                    "references": [],
+                    "outcome": "no_references",
+                })
             return None
-
-        # Load target image
-        target_image = reader.load(str(target_path))
-
-        # Build reference entries: (volume, mask) pairs
+ 
+        # Build per-reference log entries and (volume, mask) pairs.
+        alpha = self.config.mask_selection.sam_score_weight
+        ref_records = []
         reference_entries: list[tuple[np.ndarray, np.ndarray]] = []
-        for ref_obj in references:
+ 
+        for i, ref_obj in enumerate(references):
             ref_source = ref_obj.segmented_object.source_image
             ref_mask = ref_obj.segmented_object.mask
             reference_entries.append((ref_source.volume, ref_mask))
-
+ 
+            sam = float(ref_obj.segmented_object.confidence or 0.0)
+            conf = float(ref_obj.labeling_confidence)
+            combined = alpha * sam + (1.0 - alpha) * conf
+            ref_src_path = getattr(ref_source, "source_path", None)
+            ref_name = Path(ref_src_path).name if ref_src_path else f"ref_{i}"
+            ref_records.append({
+                "index": i,
+                "source": ref_name,
+                "sam_score": sam,
+                "labeling_confidence": conf,
+                "combined_score": float(combined),
+                "mask_area": int(ref_mask.sum()),
+            })
+ 
+        # Compute the mean centroid of reference masks once, before loading
+        # the target. Used by the connected-component filter below.
+        ref_centroid = self._reference_centroid(reference_entries)
+ 
+        # Print reference summary to stdout
+        print(f"    [REFS] cluster_{cluster_id} target={target_path.name} "
+              f"ctx={context}:")
+        for r in ref_records:
+            print(f"      ref_{r['index']}: {r['source']:<24}  "
+                  f"sam={r['sam_score']:.3f}  "
+                  f"conf={r['labeling_confidence']:.3f}  "
+                  f"combined={r['combined_score']:.3f}  "
+                  f"area={r['mask_area']}")
+ 
+        # Load target image and propagate
+        target_image = reader.load(str(target_path))
         organ_name = self._get_cluster_name(cluster_id, labeled_by_image)
-
-        # Single multi-reference video call
+ 
         recovered = self.segmenter.segment_with_multi_reference(
             target_image=target_image,
             reference_entries=reference_entries,
             organ_name=organ_name,
         )
-
+ 
+        # Connected-component filter: keep the component closest to
+        # the reference centroid, discard the rest.
+        if recovered is not None:
+            filtered_mask = self._select_closest_component(
+                recovered.mask, ref_centroid,
+            )
+            if filtered_mask is None or not filtered_mask.any():
+                print(f"    [CC-FILTER] No valid component found for "
+                      f"cluster_{cluster_id} in {target_path.name}")
+                recovered = None
+            elif filtered_mask.sum() < recovered.mask.sum():
+                n_before = int(recovered.mask.sum())
+                n_after = int(filtered_mask.sum())
+                print(f"    [CC-FILTER] cluster_{cluster_id} "
+                      f"{target_path.name}: "
+                      f"area {n_before} -> {n_after} "
+                      f"({n_before - n_after} px discarded)")
+                recovered.mask = filtered_mask
+ 
+        # Build log entry
+        log_entry = {
+            "target": target_path.name,
+            "cluster_id": int(cluster_id),
+            "context": context,
+            "references": ref_records,
+        }
+        if recovered is None:
+            log_entry["outcome"] = "propagation_failed"
+        else:
+            log_entry["outcome"] = "ok"
+            log_entry["recovered_mask_area"] = int(recovered.mask.sum())
+            log_entry["recovered_sam_confidence"] = float(
+                recovered.confidence or 0.0
+            )
+        if hasattr(self, "_refinement_log"):
+            self._refinement_log.append(log_entry)
+ 
         return recovered
 
     def _get_cluster_name(
@@ -381,3 +519,80 @@ class RetroactiveRefiner(Refiner):
                 if obj.organ_id == cluster_id and not obj.is_noise:
                     return obj.organ_name
         return f"cluster_{cluster_id}"
+
+
+    @staticmethod
+    def _reference_centroid(
+        reference_entries: list[tuple[np.ndarray, np.ndarray]],
+    ) -> tuple[float, float]:
+        """Compute mean (row, col) centroid across all reference masks.
+ 
+        Used as the anchor point for the connected-component filter.
+        Returns (0, 0) if all reference masks are empty (degenerate case).
+        """
+        rows, cols = [], []
+        for _, mask in reference_entries:
+            if mask.any():
+                ys, xs = np.where(mask)
+                rows.append(float(ys.mean()))
+                cols.append(float(xs.mean()))
+        if not rows:
+            return (0.0, 0.0)
+        return (float(np.mean(rows)), float(np.mean(cols)))
+    
+    @staticmethod
+    def _select_closest_component(
+        mask: np.ndarray,
+        ref_centroid: tuple[float, float],
+        min_component_area: int = 50,
+    ) -> np.ndarray | None:
+        """Keep the connected component whose centroid is closest to
+        ref_centroid; discard all others.
+ 
+        Components smaller than min_component_area pixels are treated as
+        noise and never selected regardless of centroid distance.
+ 
+        Parameters
+        ----------
+        mask : np.ndarray
+            Binary mask (H, W) as returned by SAM2.
+        ref_centroid : tuple[float, float]
+            (row, col) mean centroid of the K reference masks.
+        min_component_area : int
+            Minimum pixel area for a component to be a candidate.
+ 
+        Returns
+        -------
+        np.ndarray or None
+            Binary mask containing only the selected component,
+            or None if no component passes the area threshold.
+        """
+        from scipy.ndimage import label as cc_label
+ 
+        labeled_arr, n_components = cc_label(mask)
+        if n_components == 0:
+            return None
+        if n_components == 1:
+            # Fast path: nothing to filter
+            return mask
+ 
+        ref_row, ref_col = ref_centroid
+        best_label = None
+        best_dist = float("inf")
+ 
+        for comp_id in range(1, n_components + 1):
+            comp_mask = labeled_arr == comp_id
+            area = int(comp_mask.sum())
+            if area < min_component_area:
+                continue
+            ys, xs = np.where(comp_mask)
+            cy, cx = float(ys.mean()), float(xs.mean())
+            dist = ((cy - ref_row) ** 2 + (cx - ref_col) ** 2) ** 0.5
+            if dist < best_dist:
+                best_dist = dist
+                best_label = comp_id
+ 
+        if best_label is None:
+            return None
+ 
+        return (labeled_arr == best_label)

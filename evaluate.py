@@ -111,13 +111,236 @@ def hausdorff_95(pred: np.ndarray, gt: np.ndarray) -> float:
 
 
 def compute_quality_metrics(pred: np.ndarray, gt: np.ndarray) -> dict:
-    """Compute Dice, IoU, HD95 for a single (pred, gt) pair."""
+    """Compute all quality metrics for a single (pred, gt) pair."""
     return {
         "dice": dice_score(pred, gt),
         "iou": iou_score(pred, gt),
+        "hausdorff": hausdorff_full(pred, gt),
         "hausdorff_95": hausdorff_95(pred, gt),
+        "assd": assd(pred, gt),
     }
 
+def hausdorff_full(pred: np.ndarray, gt: np.ndarray) -> float:
+    """
+    Symmetric Hausdorff distance (maximum, not 95th percentile).
+    
+    Defined as max over both directions of the maximum surface-to-surface
+    distance. Captures the worst-case boundary error, complementing HD95
+    (typical case) and ASSD (average case).
+    
+    Returns 0.0 if both masks are empty, inf if only one is empty.
+    """
+    pred_points = np.argwhere(pred)
+    gt_points = np.argwhere(gt)
+    
+    if len(pred_points) == 0 and len(gt_points) == 0:
+        return 0.0
+    if len(pred_points) == 0 or len(gt_points) == 0:
+        return float("inf")
+    
+    from scipy.ndimage import distance_transform_edt
+    dt_gt = distance_transform_edt(~gt)
+    dt_pred = distance_transform_edt(~pred)
+    
+    # Directed max distances
+    max_p_to_g = float(dt_gt[pred].max())
+    max_g_to_p = float(dt_pred[gt].max())
+    
+    return max(max_p_to_g, max_g_to_p)
+
+
+def assd(pred: np.ndarray, gt: np.ndarray) -> float:
+    """
+    Average Symmetric Surface Distance.
+    
+    Mean distance from each point on one boundary to the closest point on
+    the other, computed symmetrically. Complements HD95 by capturing the
+    average boundary error rather than the worst percentile.
+    
+    Returns 0.0 if both masks are empty, inf if only one is empty.
+    """
+    pred_points = np.argwhere(pred)
+    gt_points = np.argwhere(gt)
+    
+    if len(pred_points) == 0 and len(gt_points) == 0:
+        return 0.0
+    if len(pred_points) == 0 or len(gt_points) == 0:
+        return float("inf")
+    
+    from scipy.ndimage import distance_transform_edt
+    dt_gt = distance_transform_edt(~gt)
+    dt_pred = distance_transform_edt(~pred)
+    
+    # Surface points only (boundary), via XOR with eroded mask
+    from scipy.ndimage import binary_erosion
+    pred_surface = pred & ~binary_erosion(pred)
+    gt_surface = gt & ~binary_erosion(gt)
+    
+    if not pred_surface.any() or not gt_surface.any():
+        # Degenerate masks (single pixel etc): fall back to all points
+        distances = np.concatenate([dt_gt[pred], dt_pred[gt]])
+    else:
+        distances = np.concatenate([dt_gt[pred_surface], dt_pred[gt_surface]])
+    
+    return float(distances.mean())
+
+def compute_average_precision(
+    matched_ious: list[float],
+    matched_scores: list[float],
+    n_gt: int,
+    iou_threshold: float,
+) -> float:
+    """
+    Compute average precision at one IoU threshold (COCO-style).
+    
+    Given a list of (iou_with_matched_gt, prediction_score) pairs and the
+    total number of GT instances, compute AP as the area under the
+    precision-recall curve traced by varying the score threshold.
+    
+    Parameters
+    ----------
+    matched_ious : list[float]
+        IoU of each prediction with its best-matching GT.
+        For unmatched predictions, use 0.0.
+    matched_scores : list[float]
+        Confidence score of each prediction (e.g., combined SAM + labeling).
+        Used to order predictions for the PR curve.
+    n_gt : int
+        Total number of GT instances in the dataset. Sets the recall
+        denominator.
+    iou_threshold : float
+        Minimum IoU for a prediction to count as a true positive.
+    
+    Returns
+    -------
+    float
+        AP in [0, 1]. Returns 0.0 if there are no predictions or no GTs.
+    """
+    if n_gt == 0 or len(matched_ious) == 0:
+        return 0.0
+    
+    # Sort predictions by descending score
+    order = np.argsort(-np.array(matched_scores))
+    sorted_ious = np.array(matched_ious)[order]
+    
+    # Cumulative TP / FP along the sorted list
+    tp = (sorted_ious >= iou_threshold).astype(np.float64)
+    fp = 1.0 - tp
+    cum_tp = np.cumsum(tp)
+    cum_fp = np.cumsum(fp)
+    
+    recall = cum_tp / n_gt
+    precision = cum_tp / (cum_tp + cum_fp + 1e-12)
+    
+    # Pascal VOC 2010+ style: integrate using monotonic precision envelope
+    # (precision never decreases as recall decreases)
+    precision_envelope = np.maximum.accumulate(precision[::-1])[::-1]
+    
+    # Integrate over recall axis
+    recall_extended = np.concatenate([[0.0], recall, [1.0]])
+    precision_extended = np.concatenate([[precision_envelope[0]],
+                                          precision_envelope, [0.0]])
+    
+    # Sum rectangles (recall_i+1 - recall_i) * precision_i+1
+    return float(np.sum(
+        (recall_extended[1:] - recall_extended[:-1]) * precision_extended[1:]
+    ))
+
+
+def compute_map(
+    pred_masks_per_image: list[dict[str, np.ndarray]],
+    gt_masks_per_image: list[dict[str, np.ndarray]],
+    pred_scores_per_image: list[dict[str, float]],
+    iou_thresholds: list[float] | None = None,
+) -> dict:
+    """
+    Compute mean Average Precision over a range of IoU thresholds (COCO-style).
+    
+    For each image, each prediction is greedy-matched to its best-IoU GT;
+    each GT can be matched at most once (highest-scoring prediction wins).
+    Predictions and GTs across all images are then pooled and AP is computed
+    at each threshold. mAP is the mean of those APs.
+    
+    Parameters
+    ----------
+    pred_masks_per_image : list[dict[str, np.ndarray]]
+        Per image, dict mapping prediction name to binary mask.
+    gt_masks_per_image : list[dict[str, np.ndarray]]
+        Per image, dict mapping GT name to binary mask. Same length as
+        pred_masks_per_image and same image order.
+    pred_scores_per_image : list[dict[str, float]]
+        Per image, dict mapping prediction name to its confidence score
+        (e.g., SAM score, or combined SAM + labeling confidence).
+        Same length and image order.
+    iou_thresholds : list[float] or None
+        Thresholds at which to compute AP. Defaults to [0.5, 0.55, ..., 0.95].
+    
+    Returns
+    -------
+    dict with:
+        ap_per_threshold: {thr: ap_value}
+        map: mean over thresholds
+        map_50: AP at IoU=0.5 (Pascal VOC criterion)
+        map_75: AP at IoU=0.75 (stricter)
+    """
+    if iou_thresholds is None:
+        iou_thresholds = list(np.arange(0.5, 1.0, 0.05))
+    
+    # Greedy match per image: for each prediction, its best GT IoU.
+    # Each GT can be claimed only once (highest-scoring pred wins).
+    pooled_ious: list[float] = []
+    pooled_scores: list[float] = []
+    total_gt = 0
+    
+    for preds, gts, scores in zip(
+        pred_masks_per_image, gt_masks_per_image, pred_scores_per_image,
+    ):
+        total_gt += len(gts)
+        if not preds:
+            continue
+        
+        gt_items = list(gts.items())
+        pred_items = list(preds.items())
+        
+        # Sort predictions by descending score (greedy match)
+        pred_items_sorted = sorted(
+            pred_items,
+            key=lambda x: -scores.get(x[0], 0.0),
+        )
+        
+        claimed_gt: set[int] = set()
+        for pred_name, pred_mask in pred_items_sorted:
+            best_iou = 0.0
+            best_gt_idx = -1
+            for gt_idx, (_, gt_mask) in enumerate(gt_items):
+                if gt_idx in claimed_gt:
+                    continue
+                iou = iou_score(pred_mask, gt_mask)
+                if iou > best_iou:
+                    best_iou = iou
+                    best_gt_idx = gt_idx
+            
+            pooled_ious.append(best_iou)
+            pooled_scores.append(scores.get(pred_name, 0.0))
+            if best_gt_idx >= 0:
+                claimed_gt.add(best_gt_idx)
+    
+    # AP at each threshold
+    ap_per_threshold = {}
+    for thr in iou_thresholds:
+        ap = compute_average_precision(
+            pooled_ious, pooled_scores, total_gt, thr,
+        )
+        ap_per_threshold[float(thr)] = float(ap)
+    
+    map_value = float(np.mean(list(ap_per_threshold.values())))
+    
+    return {
+        "ap_per_threshold": ap_per_threshold,
+        "map": map_value,
+        "map_50": ap_per_threshold.get(0.5, 0.0),
+        "map_75": ap_per_threshold.get(0.75, 0.0),
+    }
 
 # ---------------------------------------------------------------------------
 # Mask loading
@@ -137,6 +360,24 @@ def load_masks_from_dir(mask_dir: Path) -> dict[str, np.ndarray]:
         masks[f.stem] = np.array(Image.open(f).convert("L")) > 127
     return masks
 
+def load_scores_from_dir(mask_dir: Path) -> dict[str, float]:
+    """Load per-prediction scores from a scores.json file in the mask dir.
+
+    Returns a dict mapping mask stem (e.g., 'organ_a', 'lung_1') to the
+    `combined` score. Returns an empty dict if scores.json is missing,
+    which triggers the fallback `score=1.0` for all predictions in
+    evaluate(). This keeps the evaluator backward-compatible with runs
+    that pre-date the scoring feature.
+    """
+    scores_path = mask_dir / "scores.json"
+    if not scores_path.exists():
+        return {}
+    with open(scores_path) as f:
+        raw = json.load(f)
+    return {
+        Path(filename).stem: float(entry.get("combined", 1.0))
+        for filename, entry in raw.items()
+    }
 
 def parse_organ_name(stem: str) -> str:
     """
@@ -358,24 +599,25 @@ def compute_pr_counts(
 
 def aggregate_quality(all_results: list[dict]) -> dict:
     """
-    Aggregate per-pair quality metrics (dice, iou, hd95) per organ and globally.
-
-    HD95 entries equal to inf are excluded from the mean/std computation
+    Aggregate per-pair quality metrics per organ and globally.
+    
+    HD, HD95, and ASSD entries equal to inf are excluded from mean/std
     but counted toward the 'missing' field.
     """
-    metrics_keys = ["dice", "iou", "hausdorff_95"]
+    metrics_keys = ["dice", "iou", "hausdorff", "hausdorff_95", "assd"]
+    inf_metrics = {"hausdorff", "hausdorff_95", "assd"}
     by_organ: dict[str, list[dict]] = {}
     for r in all_results:
         by_organ.setdefault(r["organ"], []).append(r)
-
+    
     summary: dict = {"per_organ": {}, "global": {}}
-
+    
     for organ, entries in sorted(by_organ.items()):
         organ_summary = {"count": len(entries)}
         for key in metrics_keys:
             values = [
                 e[key] for e in entries
-                if not (key == "hausdorff_95" and e[key] == float("inf"))
+                if not (key in inf_metrics and e[key] == float("inf"))
             ]
             if values:
                 organ_summary[f"{key}_mean"] = float(np.mean(values))
@@ -387,11 +629,11 @@ def aggregate_quality(all_results: list[dict]) -> dict:
             1 for e in entries if e.get("pred_name") is None
         )
         summary["per_organ"][organ] = organ_summary
-
+    
     for key in metrics_keys:
         values = [
             r[key] for r in all_results
-            if not (key == "hausdorff_95" and r[key] == float("inf"))
+            if not (key in inf_metrics and r[key] == float("inf"))
         ]
         if values:
             summary["global"][f"{key}_mean"] = float(np.mean(values))
@@ -399,7 +641,7 @@ def aggregate_quality(all_results: list[dict]) -> dict:
         else:
             summary["global"][f"{key}_mean"] = None
             summary["global"][f"{key}_std"] = None
-
+    
     return summary
 
 
@@ -493,12 +735,14 @@ def evaluate(
     pred_dir: Path,
     matching: str,
     iou_thresholds: list[float],
+    compute_map_metric: bool = True,
 ) -> tuple[list[dict], dict]:
     """
     Run evaluation across all images.
 
     Quality metrics use the chosen matching strategy.
     Coverage / cleanliness metrics are matching-agnostic.
+    mAP@[0.5:0.95] is matching-agnostic and pools predictions across images.
     """
     match_fn = match_semantic if matching == "semantic" else match_hungarian
 
@@ -520,24 +764,47 @@ def evaluate(
     all_results: list[dict] = []
     pr_counts_by_thr: dict[float, list[dict]] = {thr: [] for thr in iou_thresholds}
 
+    # mAP accumulators (initialized here so the loop can append into them)
+    pred_masks_all: list[dict] = []
+    gt_masks_all: list[dict] = []
+    pred_scores_all: list[dict] = []
+
     for stem in common:
         gt_masks = load_masks_from_dir(gt_dir / stem)
         pred_masks = load_masks_from_dir(pred_dir / stem)
+        pred_scores = load_scores_from_dir(pred_dir / stem)
 
         if not gt_masks:
             continue
 
-        # Matched quality metrics (dice, iou, hd95)
         image_results = match_fn(pred_masks, gt_masks)
         for r in image_results:
             r["image"] = stem
         all_results.extend(image_results)
 
-        # Coverage / cleanliness counts at each threshold
         for thr in iou_thresholds:
             pr_counts_by_thr[thr].append(
                 compute_pr_counts(pred_masks, gt_masks, thr)
             )
+
+        # Accumulate for mAP: real scores if available, fallback to 1.0
+        pred_masks_all.append(pred_masks)
+        gt_masks_all.append(gt_masks)
+        pred_scores_all.append({
+            name: pred_scores.get(name, 1.0) for name in pred_masks
+        })
+
+    # Report whether real scores or fallback were used (helps interpret mAP)
+    n_pred = sum(len(s) for s in pred_scores_all)
+    n_with_score = sum(
+        1 for image_scores in pred_scores_all
+        for v in image_scores.values()
+        if v != 1.0
+    )
+    if n_pred > 0:
+        pct = 100 * n_with_score / n_pred
+        print(f"  mAP scoring: {n_with_score}/{n_pred} predictions ({pct:.0f}%) "
+              f"have real scores; rest use fallback=1.0")
 
     # Aggregate
     quality_summary = aggregate_quality(all_results)
@@ -553,6 +820,16 @@ def evaluate(
         "iou_thresholds": iou_thresholds,
         "matching": matching,
     }
+
+    # mAP (matching-agnostic, COCO-style)
+    if compute_map_metric:
+        map_result = compute_map(
+            pred_masks_all, gt_masks_all, pred_scores_all,
+        )
+        summary["global"]["map"] = map_result["map"]
+        summary["global"]["map_50"] = map_result["map_50"]
+        summary["global"]["map_75"] = map_result["map_75"]
+        summary["map_per_threshold"] = map_result["ap_per_threshold"]
 
     organs = set(quality_summary["per_organ"].keys()) | set(pr_per_organ.keys())
     for organ in organs:
@@ -571,11 +848,11 @@ def save_results(
 ) -> None:
     """Save metrics.csv (per-pair quality) and summary.json (aggregated)."""
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    
     csv_path = output_dir / "metrics.csv"
     fieldnames = [
         "image", "organ", "gt_name", "pred_name",
-        "dice", "iou", "hausdorff_95",
+        "dice", "iou", "hausdorff", "hausdorff_95", "assd",
     ]
     with open(csv_path, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -583,7 +860,7 @@ def save_results(
         for row in sorted(all_results, key=lambda r: (r["image"], r["organ"])):
             writer.writerow(row)
     print(f"  Saved: {csv_path}")
-
+    
     json_path = output_dir / "summary.json"
     with open(json_path, "w") as f:
         json.dump(summary, f, indent=2)
