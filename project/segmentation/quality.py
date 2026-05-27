@@ -157,3 +157,104 @@ def get_good_cluster_ids(
         for cid, count in cluster_image_count.items()
         if count / total_images >= min_image_frequency
     }
+
+
+# -----------------------------------------------------------------------
+# Reference index for O(K) lookup (replaces O(N) scan in select_reference_masks)
+# -----------------------------------------------------------------------
+
+from dataclasses import dataclass as _dataclass, field as _field
+from collections import defaultdict as _defaultdict
+
+
+@_dataclass
+class ReferenceIndex:
+    """
+    Pre-built lookup index: cluster_id -> candidates sorted by descending
+    combined score.  Built once per refinement pass; enables O(K) selection
+    instead of the O(N*k) full-dict scan in select_reference_masks.
+    """
+    _data: dict[int, list[tuple[float, Path, LabeledObject]]] = _field(
+        default_factory=lambda: _defaultdict(list)
+    )
+
+
+def build_reference_index(
+    labeled_by_image: dict[Path, list[LabeledObject]],
+    config: MaskSelectionConfig,
+) -> ReferenceIndex:
+    """
+    Scan labeled_by_image once and build a per-cluster sorted candidate list.
+
+    O(N * k) one-time cost, where N = number of images and k = objects per
+    image.  After this, each select_from_index call costs O(K) where K =
+    num_reference_frames.
+
+    Parameters
+    ----------
+    labeled_by_image : dict[Path, list[LabeledObject]]
+        Full labeled dataset (or a snapshot thereof).
+    config : MaskSelectionConfig
+        Used for sam_score_weight and min_combined_score filtering.
+
+    Returns
+    -------
+    ReferenceIndex
+        Ready-to-query index.
+    """
+    alpha = config.sam_score_weight
+    idx = ReferenceIndex()
+
+    for path, objects in labeled_by_image.items():
+        for obj in objects:
+            if obj.is_noise or obj.organ_id == -1:
+                continue
+            sam_score = obj.segmented_object.confidence or 0.0
+            combined = alpha * sam_score + (1.0 - alpha) * obj.labeling_confidence
+            if combined >= config.min_combined_score:
+                idx._data[obj.organ_id].append((combined, path, obj))
+
+    # Sort once per cluster; from here on lookups are just slices
+    for cid in idx._data:
+        idx._data[cid].sort(key=lambda x: -x[0])
+
+    return idx
+
+
+def select_from_index(
+    cluster_id: int,
+    target_path: Path,
+    index: ReferenceIndex,
+    config: MaskSelectionConfig,
+) -> list[LabeledObject]:
+    """
+    Return the top-K references for cluster_id, excluding target_path.
+
+    O(K) — iterates the pre-sorted candidate list and stops once K non-target
+    entries have been collected.
+
+    Parameters
+    ----------
+    cluster_id : int
+        Cluster to look up.
+    target_path : Path
+        Image being refined; excluded from candidates.
+    index : ReferenceIndex
+        Pre-built index (from build_reference_index).
+    config : MaskSelectionConfig
+        Used for num_reference_frames only (score filter already applied at
+        index build time).
+
+    Returns
+    -------
+    list[LabeledObject]
+        Up to config.num_reference_frames objects, best-scored first.
+    """
+    selected = []
+    for _score, path, obj in index._data.get(cluster_id, []):
+        if path == target_path:
+            continue
+        selected.append(obj)
+        if len(selected) >= config.num_reference_frames:
+            break
+    return selected

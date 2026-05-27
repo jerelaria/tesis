@@ -34,7 +34,7 @@ a small, opinionated set of figures designed for the paper:
 
 7. organ_recovery_{dataset}_{version}.png
        Bar charts showing how many GT organs were recovered (baseline miss
-       → pipeline hit) vs lost, per pipeline variant and per organ.
+       -> pipeline hit) vs lost, per pipeline variant and per organ.
 
 8. box_plot_{metric}_{dataset}_{organ}.png
        Per-organ Dice distribution (box plots) comparing baseline vs
@@ -191,7 +191,7 @@ def _get_experiment_group(exp_name: str) -> str:
 # There is no separate v0_baseline_fs version.
 # ---------------------------------------------------------------------------
 
-# Few-shot: baseline → pipeline variants (1-to-many).
+# Few-shot: baseline -> pipeline variants (1-to-many).
 V0_FS_NAME_EQUIVALENCES: dict[str, str | list[str]] = {
     "fs_indep_baseline_1ref": [
         "fs_indep_1ref",        "fs_indep_refine_1ref",
@@ -211,7 +211,7 @@ V0_FS_NAME_EQUIVALENCES: dict[str, str | list[str]] = {
     ],
 }
 
-# Unsupervised: baseline → pipeline variants.
+# Unsupervised: baseline -> pipeline variants.
 V0_UNSUP_NAME_EQUIVALENCES: dict[str, str | list[str]] = {
     "unsup_baseline": [
         "unsup_kmeans",
@@ -236,31 +236,52 @@ _ALL_BASELINE_EXPERIMENTS: set[str] = set(ALL_V0_EQUIVALENCES.keys())
 # Metric metadata
 # ---------------------------------------------------------------------------
 
-# Each metric: (display label, colormap, value range for shared colorbar)
+# Each metric: (display label, colormap, value range for shared colorbar).
+# Distance metrics use an inverted colormap (lower = better = greener).
 METRIC_META = {
-    "dice_mean":      ("Dice",          "RdYlGn", (0.0, 1.0)),
-    "iou_mean":       ("IoU",           "RdYlGn", (0.0, 1.0)),
-    "recall@0.5":     ("Recall@0.5",    "RdYlGn", (0.0, 1.0)),
-    "precision@0.5":  ("Precision@0.5", "RdYlGn", (0.0, 1.0)),
-    "f1@0.5":         ("F1@0.5",        "RdYlGn", (0.0, 1.0)),
-    "recall@0.7":     ("Recall@0.7",    "RdYlGn", (0.0, 1.0)),
-    "precision@0.7":  ("Precision@0.7", "RdYlGn", (0.0, 1.0)),
-    "f1@0.7":         ("F1@0.7",        "RdYlGn", (0.0, 1.0)),
-    "map":            ("mAP@[.5:.95]",  "RdYlGn", (0.0, 1.0)),
-    "map_50":         ("mAP@0.5",       "RdYlGn", (0.0, 1.0)),
-    "map_75":         ("mAP@0.75",      "RdYlGn", (0.0, 1.0)),
-    # Distance metrics: lower is better, inverted colormap
-    "hausdorff_mean":    ("Hausdorff",   "RdYlGn_r", None),
-    "hausdorff_95_mean": ("HD95",        "RdYlGn_r", None),
-    "assd_mean":         ("ASSD",        "RdYlGn_r", None),
+    "dice_mean":         ("Dice",           "RdYlGn", (0.0, 1.0)),
+    "iou_mean":          ("IoU",            "RdYlGn", (0.0, 1.0)),
+    "recall@0.5":        ("Recall@0.5",     "RdYlGn", (0.0, 1.0)),
+    "precision@0.5":     ("Precision@0.5",  "RdYlGn", (0.0, 1.0)),
+    "f1@0.5":            ("F1@0.5",         "RdYlGn", (0.0, 1.0)),
+    "recall@0.7":        ("Recall@0.7",     "RdYlGn", (0.0, 1.0)),
+    "precision@0.7":     ("Precision@0.7",  "RdYlGn", (0.0, 1.0)),
+    "f1@0.7":            ("F1@0.7",         "RdYlGn", (0.0, 1.0)),
+    "map":               ("mAP@[.5:.95]",   "RdYlGn", (0.0, 1.0)),
+    "map_50":            ("mAP@0.5",        "RdYlGn", (0.0, 1.0)),
+    "map_75":            ("mAP@0.75",       "RdYlGn", (0.0, 1.0)),
+    # Distance metrics: lower is better -> inverted colormap, no fixed range.
+    "hausdorff_mean":    ("Hausdorff",      "RdYlGn_r", None),
+    "hausdorff_95_mean": ("HD95",           "RdYlGn_r", None),
+    "assd_mean":         ("ASSD",           "RdYlGn_r", None),
 }
 
+# Default metrics produced by evaluate.py, covering all tracked aspects:
+#   - overlap quality  : Dice, IoU
+#   - detection @ 0.5  : Recall, Precision, F1
+#   - detection @ 0.7  : Recall, Precision, F1  (stricter threshold)
+#   - distance quality : HD95, ASSD
 DEFAULT_METRICS = [
-    "dice_mean", "f1@0.5", "map", "hausdorff_95_mean", "assd_mean",
+    "dice_mean",
+    "iou_mean",
+    "recall@0.5", "precision@0.5", "f1@0.5",
+    "recall@0.7", "precision@0.7", "f1@0.7",
+    "hausdorff_95_mean", "assd_mean",
 ]
 
-# Default set of metrics produced by evaluate.py
-DEFAULT_METRICS = ["dice_mean", "recall@0.5", "precision@0.5", "f1@0.5"]
+# Metrics explicitly known to be global-only (no per-organ breakdown).
+# precision@T and f1@T are also global-only because they require counting
+# across the full prediction set, which cannot be decomposed per organ.
+_GLOBAL_ONLY_METRICS = {"map", "map_50", "map_75"}
+
+
+def _is_global_only(metric: str) -> bool:
+    """Return True if the metric has no meaningful per-organ breakdown."""
+    return (
+        metric in _GLOBAL_ONLY_METRICS
+        or metric.startswith("precision@")
+        or metric.startswith("f1@")
+    )
 
 
 def _metric_label(metric: str) -> str:
@@ -497,6 +518,31 @@ def _find_experiment_dir(
 
 
 # ---------------------------------------------------------------------------
+# Heatmap colorbar helpers
+# ---------------------------------------------------------------------------
+
+def _heatmap_vrange(metric: str, matrix: np.ndarray) -> tuple[float, float]:
+    """
+    Return (vmin, vmax) for a heatmap.
+
+    For [0, 1]-bounded metrics the range is fixed at (0, 1).
+    For distance metrics (no fixed range in METRIC_META) the range is
+    derived from the data so the colormap is always informative.
+    """
+    meta = METRIC_META.get(metric)
+    if meta and meta[2] is not None:
+        return meta[2]  # e.g. (0.0, 1.0)
+
+    # Distance metrics: use data range with a small margin.
+    valid = matrix[~np.isnan(matrix)]
+    if len(valid) == 0:
+        return (0.0, 1.0)
+    lo, hi = float(valid.min()), float(valid.max())
+    margin = max((hi - lo) * 0.05, 1e-6)
+    return (max(0.0, lo - margin), hi + margin)
+
+
+# ---------------------------------------------------------------------------
 # Plot 1: Per-dataset heatmap of one global metric (experiment x version)
 # ---------------------------------------------------------------------------
 
@@ -510,6 +556,8 @@ def plot_metric_heatmap_per_dataset(
     versions on x-axis, showing the absolute value of `metric` (global).
 
     Includes group separators between unsup / 1-ref / 3-ref / etc.
+    Distance metrics (HD95, ASSD) use data-driven color range and an
+    inverted colormap so that lower values appear greener.
     """
     versions = list(data.keys())
     if len(versions) < 2:
@@ -541,15 +589,17 @@ def plot_metric_heatmap_per_dataset(
                     if val is not None:
                         matrix[i, j] = val
 
+        vmin, vmax = _heatmap_vrange(metric, matrix)
+
         fig, ax = plt.subplots(
             figsize=(max(6, len(versions) * 2),
                      max(6, len(experiments) * 0.55)),
         )
-        im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=0, vmax=1)
+        im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
 
         for i in range(len(experiments)):
             for j in range(len(versions)):
-                _annotate_heatmap_cell(ax, j, i, matrix[i, j], 0, 1)
+                _annotate_heatmap_cell(ax, j, i, matrix[i, j], vmin, vmax)
 
         # Reference version separator
         if "v0_baseline" in versions:
@@ -639,15 +689,17 @@ def plot_cross_dataset_heatmap(
                     if val is not None:
                         matrix[i, j] = val
 
+        vmin, vmax = _heatmap_vrange(metric, matrix)
+
         fig, ax = plt.subplots(
             figsize=(max(6, len(datasets) * 2.2 + 2),
                      max(6, len(experiments) * 0.55)),
         )
-        im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=0, vmax=1)
+        im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
 
         for i in range(len(experiments)):
             for j in range(len(datasets)):
-                _annotate_heatmap_cell(ax, j, i, matrix[i, j], 0, 1)
+                _annotate_heatmap_cell(ax, j, i, matrix[i, j], vmin, vmax)
 
         # Group separators between unsup / 1-ref / 3-ref / ...
         _draw_group_separators(ax, experiments, axis="y")
@@ -714,15 +766,17 @@ def _plot_single_organ_heatmap(
     if np.all(np.isnan(matrix)):
         return
 
+    vmin, vmax = _heatmap_vrange(metric, matrix)
+
     fig, ax = plt.subplots(
         figsize=(max(5, len(versions) * 1.8),
                  max(5, len(experiments) * 0.55)),
     )
-    im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=0, vmax=1)
+    im = ax.imshow(matrix, cmap=cmap, aspect="auto", vmin=vmin, vmax=vmax)
 
     for i in range(len(experiments)):
         for j in range(len(versions)):
-            _annotate_heatmap_cell(ax, j, i, matrix[i, j], 0, 1)
+            _annotate_heatmap_cell(ax, j, i, matrix[i, j], vmin, vmax)
 
     # Reference version separator
     if "v0_baseline" in versions:
@@ -762,19 +816,16 @@ def plot_per_organ_heatmap(
     For each dataset, produce one standalone heatmap figure per organ plus
     one for global. Each figure has full y-axis labels for readability.
 
-    Only metrics that exist per-organ in summaries are plotted per organ.
-    Precision/F1 are global-only and are therefore skipped.
+    Metrics that are inherently global-only (precision@T, f1@T, mAP) are
+    skipped here; per-organ panels that come back empty are also skipped
+    silently inside _plot_single_organ_heatmap.
     """
     versions = list(data.keys())
     if len(versions) < 1:
         return
 
-    is_per_organ_supported = (
-        metric.startswith("dice_") or metric.startswith("iou_")
-        or metric.startswith("recall@") or metric.startswith("hausdorff_")
-    )
-    if not is_per_organ_supported:
-        print(f"  [SKIP] per-organ heatmap for {metric}: per-organ N/A")
+    if _is_global_only(metric):
+        print(f"  [SKIP] per-organ heatmap for {metric}: global-only metric")
         return
 
     all_datasets: set[str] = set()
@@ -823,8 +874,12 @@ def plot_metric_story(
 
     This is complementary to version_story: it fixes a version and
     compares experiments. Can be skipped with --skip-metric-story.
+
+    Distance metrics (HD95, ASSD) are plotted on a secondary y-axis so
+    they do not visually compete with [0, 1]-bounded metrics.
     """
-    metric_colors = {
+    # Colors for [0, 1]-bounded metrics
+    bounded_colors = {
         "dice_mean":      "#5B8DB8",
         "iou_mean":       "#7FA7C9",
         "recall@0.5":     "#6BBF6B",
@@ -834,6 +889,15 @@ def plot_metric_story(
         "precision@0.7":  "#C68E2C",
         "f1@0.7":         "#A84444",
     }
+    # Colors for distance metrics (plotted on secondary axis)
+    distance_colors = {
+        "hausdorff_95_mean": "#9C27B0",
+        "assd_mean":         "#E91E63",
+        "hausdorff_mean":    "#673AB7",
+    }
+
+    bounded_metrics  = [m for m in metrics if m not in distance_colors]
+    distance_metrics = [m for m in metrics if m in distance_colors]
 
     for version, datasets_dict in data.items():
         for dataset, exps in datasets_dict.items():
@@ -842,12 +906,19 @@ def plot_metric_story(
 
             experiments = _sort_experiments(list(exps.keys()))
             x = np.arange(len(experiments))
-            width = 0.8 / max(len(metrics), 1)
 
+            # Total bar groups: bounded + distance (on secondary axis)
+            n_groups = len(bounded_metrics) + len(distance_metrics)
+            width = 0.8 / max(n_groups, 1)
+
+            has_two_axes = bool(distance_metrics)
             fig, ax = plt.subplots(figsize=(max(8, len(experiments) * 1.0), 6))
+            ax2 = ax.twinx() if has_two_axes else None
 
             any_data = False
-            for k, metric in enumerate(metrics):
+
+            # --- Bounded metrics on primary axis ---
+            for k, metric in enumerate(bounded_metrics):
                 values = []
                 for exp in experiments:
                     val = _get_global(exps.get(exp, {}), metric)
@@ -857,15 +928,14 @@ def plot_metric_story(
                     continue
                 any_data = True
 
-                offset = (k - len(metrics) / 2 + 0.5) * width
-                color = metric_colors.get(metric, f"C{k}")
+                offset = (k - n_groups / 2 + 0.5) * width
+                color = bounded_colors.get(metric, f"C{k}")
                 bars = ax.bar(
                     x + offset, values, width,
                     label=_metric_label(metric),
                     color=color, alpha=0.85,
                     edgecolor="white", linewidth=0.5,
                 )
-
                 for bar, v in zip(bars, values):
                     if np.isnan(v):
                         continue
@@ -873,8 +943,38 @@ def plot_metric_story(
                         bar.get_x() + bar.get_width() / 2,
                         bar.get_height() + 0.01,
                         f"{v:.2f}",
-                        ha="center", va="bottom",
-                        fontsize=7,
+                        ha="center", va="bottom", fontsize=7,
+                    )
+
+            # --- Distance metrics on secondary axis ---
+            for dk, metric in enumerate(distance_metrics):
+                values = []
+                for exp in experiments:
+                    val = _get_global(exps.get(exp, {}), metric)
+                    values.append(val if val is not None else np.nan)
+
+                if all(np.isnan(v) for v in values):
+                    continue
+                any_data = True
+
+                k = len(bounded_metrics) + dk
+                offset = (k - n_groups / 2 + 0.5) * width
+                color = distance_colors.get(metric, f"C{k}")
+                bars = ax2.bar(
+                    x + offset, values, width,
+                    label=f"{_metric_label(metric)} (right axis)",
+                    color=color, alpha=0.60,
+                    edgecolor="white", linewidth=0.5,
+                    hatch="//",
+                )
+                for bar, v in zip(bars, values):
+                    if np.isnan(v):
+                        continue
+                    ax2.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.5,
+                        f"{v:.1f}",
+                        ha="center", va="bottom", fontsize=6,
                     )
 
             if not any_data:
@@ -886,8 +986,11 @@ def plot_metric_story(
 
             ax.set_ylim(0, 1.10)
             ax.set_ylabel("Metric value", fontsize=11)
+            if ax2:
+                ax2.set_ylabel("Distance (pixels)", fontsize=11, color="#9C27B0")
+
             ax.set_title(
-                f"Quality vs coverage vs cleanliness — {dataset} / {version}",
+                f"Metrics overview — {dataset} / {version}",
                 fontsize=13, fontweight="bold",
             )
             ax.set_xticks(x)
@@ -895,8 +998,16 @@ def plot_metric_story(
                 [_get_display_name(e) for e in experiments],
                 fontsize=8, rotation=35, ha="right",
             )
-            ax.legend(fontsize=9, loc="upper left",
-                      ncol=min(len(metrics), 4))
+
+            # Merge legends from both axes
+            handles, labels_leg = ax.get_legend_handles_labels()
+            if ax2:
+                h2, l2 = ax2.get_legend_handles_labels()
+                handles += h2
+                labels_leg += l2
+            ax.legend(handles, labels_leg, fontsize=8, loc="upper left",
+                      ncol=min(n_groups, 4))
+
             ax.grid(axis="y", alpha=0.3)
             ax.axhline(y=0, color="black", linewidth=0.6)
 
@@ -1011,11 +1122,12 @@ def plot_delta_vs_baseline_heatmap(
         # Left panel: reference absolute values
         ax_ref = axes[0]
         ref_vals = np.array([[ref_val] for _, _, ref_val in expanded])
+        vmin_ref, vmax_ref = _heatmap_vrange(metric, ref_vals)
         ax_ref.imshow(ref_vals, cmap=_metric_cmap(metric),
-                      aspect="auto", vmin=0, vmax=1)
+                      aspect="auto", vmin=vmin_ref, vmax=vmax_ref)
 
         for i, (_, _, ref_val) in enumerate(expanded):
-            _annotate_heatmap_cell(ax_ref, 0, i, ref_val, 0, 1)
+            _annotate_heatmap_cell(ax_ref, 0, i, ref_val, vmin_ref, vmax_ref)
 
         ax_ref.set_xticks([0])
         ax_ref.set_xticklabels([reference_version],
@@ -1042,7 +1154,10 @@ def plot_delta_vs_baseline_heatmap(
                                linewidth=1.2, linestyle="--", alpha=0.5)
             prev_group = group
 
-        # Right panel: delta heatmap (diverging colormap)
+        # Right panel: delta heatmap (diverging colormap).
+        # For distance metrics the sign of "better" is flipped: a negative
+        # delta (lower distance) is an improvement, so we invert the colormap
+        # so that blue = improvement stays consistent with overlap metrics.
         ax_delta = axes[1]
         max_abs = (
             np.nanmax(np.abs(delta_matrix))
@@ -1050,8 +1165,13 @@ def plot_delta_vs_baseline_heatmap(
         )
         clim = max(max_abs, 0.05)
 
+        is_distance = metric in {"hausdorff_mean", "hausdorff_95_mean", "assd_mean"}
+        # For distance metrics: negative delta = improvement, so use RdBu_r
+        # (red = positive = regression, blue = negative = improvement).
+        delta_cmap = "RdBu_r" if is_distance else "RdBu"
+
         im_delta = ax_delta.imshow(
-            delta_matrix, cmap="RdBu", aspect="auto",
+            delta_matrix, cmap=delta_cmap, aspect="auto",
             vmin=-clim, vmax=clim,
         )
 
@@ -1084,8 +1204,10 @@ def plot_delta_vs_baseline_heatmap(
 
         cbar = fig.colorbar(im_delta, ax=ax_delta, shrink=0.8)
         cbar.set_label(f"Δ {label} vs {reference_version}", fontsize=9)
+
+        improvement_dir = "blue = lower = improvement" if is_distance else "blue = improvement"
         ax_delta.set_title(
-            f"Δ {label}  (blue = improvement, red = regression)",
+            f"Δ {label}  ({improvement_dir}, red = regression)",
             fontsize=10,
         )
 
@@ -1206,11 +1328,12 @@ def plot_experiment_across_versions(
     Because baseline names are listed first in each candidate group, v0_baseline
     is correctly represented even when pipeline variants are absent in that version.
 
-    Y-axis adapts to the data range instead of forcing [0, 1.10].
+    Bounded metrics [0, 1] use the primary y-axis; distance metrics use a
+    secondary y-axis so they remain readable alongside detection metrics.
 
     Output: version_story_{dataset}_{experiment}.png
     """
-    metric_colors = {
+    bounded_colors = {
         "dice_mean":      "#5B8DB8",
         "iou_mean":       "#7FA7C9",
         "recall@0.5":     "#6BBF6B",
@@ -1220,6 +1343,15 @@ def plot_experiment_across_versions(
         "precision@0.7":  "#C68E2C",
         "f1@0.7":         "#A84444",
     }
+    distance_colors = {
+        "hausdorff_95_mean": "#9C27B0",
+        "assd_mean":         "#E91E63",
+        "hausdorff_mean":    "#673AB7",
+    }
+
+    bounded_metrics  = [m for m in metrics if m not in distance_colors]
+    distance_metrics = [m for m in metrics if m in distance_colors]
+    n_groups = len(bounded_metrics) + len(distance_metrics)
 
     versions = list(data.keys())
     if not versions:
@@ -1239,8 +1371,6 @@ def plot_experiment_across_versions(
             # When two entries share the same baseline anchor (candidates[0])
             # but differ in whether refinement is used, append a suffix to
             # avoid overwriting the first file with the second.
-            # Detection: if the second candidate (the primary pipeline variant
-            # for v1+) contains "refine", mark the slug accordingly.
             primary_pipeline = candidates[1] if len(candidates) > 1 else candidates[0]
             if "refine" in primary_pipeline and "refine" not in file_slug:
                 file_slug = file_slug + "_with_refine"
@@ -1272,32 +1402,33 @@ def plot_experiment_across_versions(
                 continue
 
             x = np.arange(len(present_versions))
-            width = 0.8 / max(len(metrics), 1)
+            width = 0.8 / max(n_groups, 1)
 
+            has_two_axes = bool(distance_metrics)
             fig, ax = plt.subplots(
                 figsize=(max(8, len(present_versions) * 1.2), 6)
             )
+            ax2 = ax.twinx() if has_two_axes else None
 
-            # Collect all values to compute adaptive y-axis
-            all_values: list[float] = []
+            all_bounded_values: list[float] = []
             any_data = False
 
-            for k, metric in enumerate(metrics):
+            # --- Bounded metrics on primary axis ---
+            for k, metric in enumerate(bounded_metrics):
                 values = values_by_metric[metric]
                 if all(np.isnan(v) for v in values):
                     continue
                 any_data = True
-                all_values.extend(v for v in values if not np.isnan(v))
+                all_bounded_values.extend(v for v in values if not np.isnan(v))
 
-                offset = (k - len(metrics) / 2 + 0.5) * width
-                color = metric_colors.get(metric, f"C{k}")
+                offset = (k - n_groups / 2 + 0.5) * width
+                color = bounded_colors.get(metric, f"C{k}")
                 bars = ax.bar(
                     x + offset, values, width,
                     label=_metric_label(metric),
                     color=color, alpha=0.85,
                     edgecolor="white", linewidth=0.5,
                 )
-
                 for bar, v in zip(bars, values):
                     if np.isnan(v):
                         continue
@@ -1305,24 +1436,53 @@ def plot_experiment_across_versions(
                         bar.get_x() + bar.get_width() / 2,
                         bar.get_height() + 0.005,
                         f"{v:.2f}",
-                        ha="center", va="bottom",
-                        fontsize=7,
+                        ha="center", va="bottom", fontsize=7,
+                    )
+
+            # --- Distance metrics on secondary axis ---
+            for dk, metric in enumerate(distance_metrics):
+                values = values_by_metric[metric]
+                if all(np.isnan(v) for v in values):
+                    continue
+                any_data = True
+
+                k = len(bounded_metrics) + dk
+                offset = (k - n_groups / 2 + 0.5) * width
+                color = distance_colors.get(metric, f"C{k}")
+                bars = ax2.bar(
+                    x + offset, values, width,
+                    label=f"{_metric_label(metric)} (right axis)",
+                    color=color, alpha=0.60,
+                    edgecolor="white", linewidth=0.5,
+                    hatch="//",
+                )
+                for bar, v in zip(bars, values):
+                    if np.isnan(v):
+                        continue
+                    ax2.text(
+                        bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.5,
+                        f"{v:.1f}",
+                        ha="center", va="bottom", fontsize=6,
                     )
 
             if not any_data:
                 plt.close(fig)
                 continue
 
-            # Adaptive y-axis
-            if all_values:
-                y_max = max(all_values)
-                y_min_data = min(all_values)
+            # Adaptive y-axis for bounded metrics
+            if all_bounded_values:
+                y_max = max(all_bounded_values)
+                y_min_data = min(all_bounded_values)
                 y_floor = max(0, y_min_data - 0.05) if y_min_data > 0.15 else 0
                 y_ceil = min(y_max * 1.20, 1.10) if y_max < 0.9 else 1.10
             else:
                 y_floor, y_ceil = 0, 1.10
 
             ax.set_ylim(y_floor, y_ceil)
+
+            if ax2:
+                ax2.set_ylabel("Distance (pixels)", fontsize=11, color="#9C27B0")
 
             # Mark reference version with a dashed vertical separator
             if "v0_baseline" in present_versions:
@@ -1342,7 +1502,11 @@ def plot_experiment_across_versions(
                 else:
                     x_labels.append(v)
 
-            refine_label = " + Refine" if "refine" in primary_pipeline and "refine" not in candidates[0] else ""
+            refine_label = (
+                " + Refine"
+                if "refine" in primary_pipeline and "refine" not in candidates[0]
+                else ""
+            )
             ax.set_ylabel("Metric value", fontsize=11)
             ax.set_title(
                 f"{display_name}{refine_label} across versions — {dataset}",
@@ -1350,8 +1514,16 @@ def plot_experiment_across_versions(
             )
             ax.set_xticks(x)
             ax.set_xticklabels(x_labels, fontsize=9, rotation=30, ha="right")
-            ax.legend(fontsize=9, loc="upper left",
-                      ncol=min(len(metrics), 4))
+
+            # Merge legends from both axes
+            handles, labels_leg = ax.get_legend_handles_labels()
+            if ax2:
+                h2, l2 = ax2.get_legend_handles_labels()
+                handles += h2
+                labels_leg += l2
+            ax.legend(handles, labels_leg, fontsize=8, loc="upper left",
+                      ncol=min(n_groups, 4))
+
             ax.grid(axis="y", alpha=0.3)
 
             fig.tight_layout()
@@ -1362,7 +1534,7 @@ def plot_experiment_across_versions(
 
 
 # ---------------------------------------------------------------------------
-# Plot 7: Organ recovery analysis (baseline miss → pipeline hit)
+# Plot 7: Organ recovery analysis (baseline miss -> pipeline hit)
 # ---------------------------------------------------------------------------
 
 # Default pairs: (baseline_experiment, pipeline_experiments) for recovery
@@ -1865,27 +2037,28 @@ def save_full_csv(data: dict, output_dir: Path):
                     "experiment": exp,
                     "n_images":   summary.get("n_images", 0),
                     "matching":   summary.get("matching", ""),
-                    # Quality
+                    # Overlap quality
                     "dice_mean":  g.get("dice_mean"),
                     "dice_std":   g.get("dice_std"),
                     "iou_mean":   g.get("iou_mean"),
                     "iou_std":    g.get("iou_std"),
+                    # Distance quality
                     "hd95_mean":  g.get("hausdorff_95_mean"),
                     "hd95_std":   g.get("hausdorff_95_std"),
+                    "hd_mean":    g.get("hausdorff_mean"),
+                    "hd_std":     g.get("hausdorff_std"),
+                    "assd_mean":  g.get("assd_mean"),
+                    "assd_std":   g.get("assd_std"),
                     # Pred / GT counts
                     "n_gt_total":   g.get("n_gt_total"),
                     "n_pred_total": g.get("n_pred_total"),
-
-                    "hd_mean":   g.get("hausdorff_mean"),
-                    "hd_std":    g.get("hausdorff_std"),
-                    "assd_mean": g.get("assd_mean"),
-                    "assd_std":  g.get("assd_std"),
+                    # Detection-level quality (mAP)
                     "map":       g.get("map"),
                     "map_50":    g.get("map_50"),
                     "map_75":    g.get("map_75"),
                 }
 
-                # P/R/F1 at each threshold
+                # P/R/F1 at each threshold (0.5, 0.7, and any others found)
                 for thr in thresholds:
                     row[f"recall@{thr}"]    = g.get(f"recall@{thr}")
                     row[f"precision@{thr}"] = g.get(f"precision@{thr}")
@@ -1893,7 +2066,7 @@ def save_full_csv(data: dict, output_dir: Path):
                     row[f"n_gt_covered@{thr}"]    = g.get(f"n_gt_covered@{thr}")
                     row[f"n_pred_relevant@{thr}"] = g.get(f"n_pred_relevant@{thr}")
 
-                # Per-organ Dice + recall@thresholds
+                # Per-organ Dice + recall at each threshold
                 for organ, stats in summary.get("per_organ", {}).items():
                     row[f"{organ}_dice"]    = stats.get("dice_mean")
                     row[f"{organ}_missing"] = stats.get("missing", 0)
@@ -1908,8 +2081,10 @@ def save_full_csv(data: dict, output_dir: Path):
     fieldnames = [
         "version", "dataset", "experiment", "n_images", "matching",
         "dice_mean", "dice_std", "iou_mean", "iou_std",
-        "hd95_mean", "hd95_std",
+        "hd95_mean", "hd95_std", "hd_mean", "hd_std",
+        "assd_mean", "assd_std",
         "n_gt_total", "n_pred_total",
+        "map", "map_50", "map_75",
     ]
     for thr in thresholds:
         fieldnames += [

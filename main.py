@@ -335,6 +335,8 @@ def _run_unsupervised_or_fewshot(
     phase2_dir = results_dir / "phase2_clustering"
     phase2_dir.mkdir(exist_ok=True)
 
+    labeler.debug_dir = results_dir / "phase2_clustering"
+
     labeler.fit(all_objects)
 
     labeled_by_image = {}

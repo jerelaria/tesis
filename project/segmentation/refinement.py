@@ -29,6 +29,9 @@ from project.segmentation.quality import (
     find_absent_clusters,
     select_reference_masks,
     get_good_cluster_ids,
+    ReferenceIndex,
+    build_reference_index,
+    select_from_index,
 )
 
 
@@ -113,6 +116,17 @@ class RetroactiveRefiner(Refiner):
 
         print(f"  Good clusters for refinement: {sorted(good_clusters)}")
 
+        # Build reference index once for the entire recovery pass.
+        # Replaces the O(N) scan inside select_reference_masks with O(K)
+        # lookups. The index is built from the live labeled_by_image because
+        # at this point no mutations have happened yet.
+        ref_index = build_reference_index(
+            labeled_by_image, self.config.mask_selection
+        )
+        print(f"  Reference index built: "
+              f"{sum(len(v) for v in ref_index._data.values())} candidates "
+              f"across {len(ref_index._data)} clusters")
+
         total_recovered = 0
         total_attempts = 0
 
@@ -141,6 +155,7 @@ class RetroactiveRefiner(Refiner):
                     labeled_by_image=labeled_by_image,
                     reader=reader,
                     context="recover",
+                    reference_index=ref_index,
                 )
 
                 if recovered is None:
@@ -297,6 +312,12 @@ class RetroactiveRefiner(Refiner):
                 snapped.append(obj_copy)
             snapshot[path] = snapped
  
+        # Build reference index from the snapshot so that masks mutated
+        # during this pass do not appear as improved references.
+        snap_index = build_reference_index(
+            snapshot, self.config.mask_selection
+        )
+
         # Collect improvement candidates using the live dict for scoring
         # (we want current scores, not snapshot scores).
         total_improved = 0
@@ -336,6 +357,7 @@ class RetroactiveRefiner(Refiner):
                     reader=reader,
                     context="improve",
                     reference_source=snapshot,
+                    reference_index=snap_index,
                 )
  
                 if new_obj is None:
@@ -384,6 +406,7 @@ class RetroactiveRefiner(Refiner):
         reader: ImageReader,
         context: str = "recover",
         reference_source: dict[Path, list[LabeledObject]] | None = None,
+        reference_index: ReferenceIndex | None = None,
     ) -> SegmentedObject | None:
         """
         Attempt to recover a single cluster in a target image by building
@@ -401,13 +424,22 @@ class RetroactiveRefiner(Refiner):
         # do not contaminate the reference pool.
         _ref_source = reference_source if reference_source is not None \
             else labeled_by_image
-    
-        references = select_reference_masks(
-            cluster_id=cluster_id,
-            labeled_by_image=_ref_source,
-            target_path=target_path,
-            config=self.config.mask_selection,
-        )
+
+        # Use pre-built index if available (O(K)); fall back to full scan (O(N)).
+        if reference_index is not None:
+            references = select_from_index(
+                cluster_id=cluster_id,
+                target_path=target_path,
+                index=reference_index,
+                config=self.config.mask_selection,
+            )
+        else:
+            references = select_reference_masks(
+                cluster_id=cluster_id,
+                labeled_by_image=_ref_source,
+                target_path=target_path,
+                config=self.config.mask_selection,
+            )
  
         if not references:
             print(f"    No valid references for cluster_{cluster_id}")

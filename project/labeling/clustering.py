@@ -62,6 +62,7 @@ class HDBSCANConfig:
     # Fraction-based values (computed from dataset size at runtime)
     min_cluster_size_fraction: float | None = None
     min_samples_fraction: float | None = None
+    metric: str = "euclidean"
 
     def resolve(self, num_images: int) -> "HDBSCANConfig":
         """
@@ -189,6 +190,7 @@ class ClusteringLabeler(Labeler):
         self._feature_indices = [FEATURE_INDEX[f] for f in config.features]
         self._scaler = StandardScaler() if config.standardize else None
         self._embedding_reducer = None  # Fitted during fit()
+        self.debug_dir: Path | None = None
 
     @classmethod
     def from_config(cls, yaml_path: str) -> "ClusteringLabeler":
@@ -248,6 +250,28 @@ class ClusteringLabeler(Labeler):
             If any object has no features extracted.
         """
         X = self._extract_feature_matrix(objects, fitting=True)
+
+        # --- Save feature matrix for offline analysis ---
+        if self.debug_dir is not None:
+            import pandas as pd
+            self.debug_dir.mkdir(parents=True, exist_ok=True)
+
+            # Build column names
+            moment_cols = [FEATURE_NAMES[i] for i in self._feature_indices]
+            if self.config.embedding.enabled:
+                n_emb = X.shape[1] - len(moment_cols)
+                emb_cols = [f"emb_{i}" for i in range(n_emb)]
+            else:
+                emb_cols = []
+            cols = moment_cols + emb_cols
+
+            df = pd.DataFrame(X, columns=cols)
+            df.insert(0, "object_id", [obj.id for obj in objects])
+            csv_path = self.debug_dir / "clustering_features.csv"
+            df.to_csv(csv_path, index=False)
+            print(f"  Feature matrix saved -> {csv_path}  ({df.shape})")
+        # ------------------------------------------------
+
         print(f"Clustering matrix: {X.shape} "
               f"({len(self._feature_indices)} moments"
               f"{f' + {X.shape[1] - len(self._feature_indices)} embedding dims' if self.config.embedding.enabled else ''})")
@@ -319,6 +343,7 @@ class ClusteringLabeler(Labeler):
             return HDBSCAN(
                 min_cluster_size=mcs,
                 min_samples=ms,
+                metric=self.config.hdbscan.metric,
             )
         raise NotImplementedError(f"Algorithm '{self.config.algorithm}' is not implemented.")
 
