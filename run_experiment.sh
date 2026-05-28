@@ -18,11 +18,9 @@ set -e
 #                             Useful to run a single baseline as its own
 #                             version without the full ablation suite.
 #   --unsup-configs cfg1 ...  Override the default unsupervised config list.
-#   --tg-configs cfg1 ...     Override the default text-guided config list.
 #   --override KEY=VAL ...    Config overrides forwarded to main.py
 #   --skip-unsup              Skip unsupervised experiments
 #   --skip-fewshot            Skip few-shot experiments
-#   --skip-textguided         Skip text-guided experiments
 #   --skip-eval               Skip evaluation step
 #   --skip-plots              Skip plot generation
 #
@@ -32,7 +30,7 @@ set -e
 #
 #   # Run only the few-shot baseline as its own version
 #   ./run_all.sh v0_baseline_fs XRayNicoSent/images \
-#       --skip-unsup --skip-textguided \
+#       --skip-unsup \
 #       --fs-configs configs/experiments/fs_indep_baseline.yaml \
 #       --fs-sizes 1 5 10
 #
@@ -56,7 +54,6 @@ REF_IMAGES=()
 OVERRIDES=()
 SKIP_UNSUP=false
 SKIP_FEWSHOT=false
-SKIP_TEXTGUIDED=false
 SKIP_EVAL=false
 SKIP_PLOTS=false
 
@@ -78,9 +75,6 @@ FEW_SHOT_CONFIGS=(
     configs/experiments/fs_iter_refine.yaml
 )
 
-TEXT_GUIDED_CONFIGS=(
-    configs/experiments/tg.yaml
-)
 
 # ── Arg parsing ──────────────────────────────────────────────────────────────
 
@@ -127,24 +121,12 @@ while [[ $# -gt 0 ]]; do
                 shift
             done
             ;;
-        --tg-configs)
-            shift
-            TEXT_GUIDED_CONFIGS=()
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                TEXT_GUIDED_CONFIGS+=("$1")
-                shift
-            done
-            ;;
         --skip-unsup)
             SKIP_UNSUP=true
             shift
             ;;
         --skip-fewshot)
             SKIP_FEWSHOT=true
-            shift
-            ;;
-        --skip-textguided)
-            SKIP_TEXTGUIDED=true
             shift
             ;;
         --skip-eval)
@@ -187,10 +169,8 @@ echo "  Ref images:      ${REF_IMAGES[*]:-auto-discover}"
 echo "  Overrides:       ${OVERRIDES[*]:-none}"
 echo "  Unsup configs:   ${UNSUPERVISED_CONFIGS[*]}"
 echo "  FS configs:      ${FEW_SHOT_CONFIGS[*]}"
-echo "  TG configs:      ${TEXT_GUIDED_CONFIGS[*]}"
 echo "  Skip unsup:      ${SKIP_UNSUP}"
 echo "  Skip fewshot:    ${SKIP_FEWSHOT}"
-echo "  Skip textguided: ${SKIP_TEXTGUIDED}"
 echo "############################################################"
 
 # ── Helper functions ─────────────────────────────────────────────────────────
@@ -299,14 +279,6 @@ for dataset in "${DATASETS[@]}"; do
         done
     fi
 
-    # ── Text-guided (semantic matching) ───────────────────────────────────
-    if [ "$SKIP_TEXTGUIDED" = false ]; then
-        echo ""
-        echo "  ── Text-guided experiments ──"
-        for cfg in "${TEXT_GUIDED_CONFIGS[@]}"; do
-            run_experiment "$cfg" "semantic" "$dataset"
-        done
-    fi
 
     # ── Plots ─────────────────────────────────────────────────────────────
     if [ "$SKIP_PLOTS" = false ]; then

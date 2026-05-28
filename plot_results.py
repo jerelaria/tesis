@@ -44,7 +44,6 @@ DISPLAY_NAMES = {
     "fs_iter_1ref": "Iter\n1ref",
     "fs_iter_4ref": "Iter\n4ref",
     "fs_iter_4ref_refine": "Iter\n4ref+R",
-    "tg": "Text\nGuided",
 }
 
 # Color palette: group by supervision mode
@@ -52,7 +51,6 @@ MODE_COLORS = {
     "unsup": "#5B8DB8",
     "fs_indep": "#E8A838",
     "fs_iter": "#6BBF6B",
-    "tg": "#D45B5B",
 }
 
 def _get_color(name: str) -> str:
@@ -73,7 +71,6 @@ EXPERIMENT_ORDER = [
     "fs_indep_1ref", "fs_indep_1ref_refine",
     "fs_indep_4ref", "fs_indep_4ref_refine",
     "fs_iter_1ref", "fs_iter_4ref", "fs_iter_4ref_refine",
-    "tg",
 ]
 
 

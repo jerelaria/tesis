@@ -1,10 +1,9 @@
 """
 Main entry point for the co-segmentation and anatomical labeling pipeline.
 
-Supports three modes configured via YAML:
+Supports two modes configured via YAML:
 - unsupervised: grid-based segmentation + clustering + optional refinement
 - few_shot: video predictor with K reference images + clustering + semantic mapping
-- text_guided: MedSAM3 text prompts + optional clustering
 
 Few-shot propagation modes:
 - independent: (K+1)-frame video per target (K refs + 1 target). Order-invariant.
@@ -115,16 +114,17 @@ def main(
 
     num_images = len(image_paths)
 
+    # Future: text_guided mode (MedSAM3 with text prompts) can be reintroduced
+    # here. See archived implementation in git tag 'pre-refactor' or in
+    # project/segmentation/medsam3.py at that commit.
     if mode in ("unsupervised", "few_shot"):
         _run_unsupervised_or_fewshot(
             cfg, mode, image_paths, results_dir, references, num_images,
         )
-    elif mode == "text_guided":
-        _run_text_guided(cfg, image_paths, results_dir, num_images)
     else:
         raise ValueError(
             f"Unknown mode: '{mode}'. "
-            "Must be one of: unsupervised, few_shot, text_guided"
+            "Must be one of: unsupervised, few_shot"
         )
 
     # Save resolved config for reproducibility
@@ -188,7 +188,6 @@ def _run_unsupervised_or_fewshot(
 
     # Clustering can be disabled in few-shot and unsupervised modes to
     # benchmark raw MedSAM2 output as a minimal-pipeline baseline.
-    # Mirrors the text_guided.clustering_enabled pattern.
     clustering_enabled = True
     if mode == "few_shot":
         clustering_enabled = cfg.get("few_shot", {}).get(
@@ -571,114 +570,6 @@ def _phase1_few_shot_iterative(
             print(f"    [SKIP] {path.name}")
 
     return all_objects, objects_by_image
-
-
-# ======================================================================
-# TEXT-GUIDED PIPELINE
-# ======================================================================
-
-def _run_text_guided(
-    cfg: dict, image_paths: list[Path], results_dir: Path, num_images: int,
-):
-    from project.segmentation.medsam3 import MedSAM3Segmenter, MedSAM3Config
-
-    reader = MedicalImageReader()
-    extractor = MomentFeatureExtractor()
-
-    seg_cfg = dict(cfg["segmenter"])
-    seg_cfg.pop("model", None)
-    tg_cfg = cfg.get("text_guided", {})
-    if "prompts" in tg_cfg:
-        seg_cfg["prompts"] = tg_cfg["prompts"]
-
-    segmenter = MedSAM3Segmenter(MedSAM3Config(**seg_cfg))
-    clustering_enabled = tg_cfg.get("clustering_enabled", True)
-
-    # Phase 1
-    print("\n" + "=" * 60)
-    print("Phase 1: MedSAM3 Segmentation")
-    print("=" * 60)
-
-    phase1_dir = results_dir / "phase1_segmentation"
-    phase1_dir.mkdir(exist_ok=True)
-
-    all_objects = []
-    objects_by_image = {}
-
-    for idx, path in enumerate(image_paths):
-        print(f"\n  [{idx+1}/{len(image_paths)}] {path.name}")
-        image = reader.load(str(path))
-        objects = segmenter.segment(image)
-        print(f"    MedSAM3: {len(objects)} objects")
-
-        valid = _extract_features(objects, extractor)
-        if valid:
-            objects_by_image[path] = valid
-            all_objects.extend(valid)
-            save_segmentation_vis(path, valid, phase1_dir)
-
-    print(f"\nTotal objects: {len(all_objects)}")
-
-    if clustering_enabled:
-        print("\n" + "=" * 60)
-        print("Phase 2: Clustering")
-        print("=" * 60)
-
-        phase2_dir = results_dir / "phase2_clustering"
-        phase2_dir.mkdir(exist_ok=True)
-
-        labeler = ClusteringLabeler(ClusteringConfig(**cfg["labeler"]))
-        labeler.resolve_adaptive_params(num_images)
-        labeler.fit(all_objects)
-
-        labeled_by_image = {}
-        for path, objects in objects_by_image.items():
-            labeled = labeler.label(objects)
-            labeled_by_image[path] = labeled
-            save_visualization(path, labeled, phase2_dir, suffix="_clustered")
-
-        print("\n" + "=" * 60)
-        print("Phase 3: Cluster Filtering")
-        print("=" * 60)
-
-        phase3_dir = results_dir / "phase3_filtered"
-        phase3_dir.mkdir(exist_ok=True)
-
-        cluster_filter = ClusterFilter(
-            ClusterFilterConfig(**cfg["cluster_filter"])
-        )
-        labeled_by_image = cluster_filter.filter(labeled_by_image)
-
-        if cfg["cluster_filter"].get("deduplicate_per_image", False):
-            labeled_by_image = cluster_filter.deduplicate_per_image(
-                labeled_by_image
-            )
-
-        for path, labeled in labeled_by_image.items():
-            save_visualization(path, labeled, phase3_dir, suffix="_filtered")
-
-        _save_predicted_masks(labeled_by_image, results_dir)
-        _print_summary(all_objects, labeled_by_image)
-    else:
-        # No clustering: use MedSAM3 labels directly
-        from project.core.data_types import LabeledObject
-
-        labeled_by_image = {}
-        for path, objects in objects_by_image.items():
-            labeled = []
-            for obj in objects:
-                labeled.append(LabeledObject(
-                    segmented_object=obj,
-                    organ_id=0,
-                    organ_name=obj.label or "unknown",
-                    labeling_confidence=obj.confidence or 0.0,
-                    method_used="text_guided_medsam3",
-                ))
-            labeled_by_image[path] = labeled
-
-        _save_predicted_masks(labeled_by_image, results_dir)
-        _print_summary(all_objects, labeled_by_image)
-
 
 # ======================================================================
 # UTILITIES

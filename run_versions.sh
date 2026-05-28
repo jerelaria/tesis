@@ -122,9 +122,6 @@ for i in "${!VERSIONS[@]}"; do
     if [[ "$VERSION_SKIPS" == *"fs"* ]]; then
         SKIP_ARGS+=(--skip-fewshot)
     fi
-    if [[ "$VERSION_SKIPS" == *"tg"* ]]; then
-        SKIP_ARGS+=(--skip-textguided)
-    fi
     if [[ "$VERSION_SKIPS" == *"unsup"* ]]; then
         SKIP_ARGS+=(--skip-unsup)
     fi

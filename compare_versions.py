@@ -117,8 +117,6 @@ DISPLAY_NAMES = {
     "fs_iter_refine_3ref":     "Iter + Refine (3 ref)",
     "fs_iter_refine_5ref":     "Iter + Refine (5 ref)",
     "fs_iter_refine_10ref":    "Iter + Refine (10 ref)",
-    # --- Text-guided ---
-    "tg": "Text Guided",
 }
 
 # Canonical display order: grouped by approach, then by ref count.
@@ -144,8 +142,6 @@ EXPERIMENT_ORDER = [
     "fs_indep_baseline_10ref",
     "fs_indep_10ref",          "fs_indep_refine_10ref",
     "fs_iter_10ref",           "fs_iter_refine_10ref",
-    # Text-guided
-    "tg",
 ]
 
 # Classify each experiment into a group for visual separators.
@@ -172,7 +168,6 @@ _GROUP_PREFIXES = [
     ("fs_indep_refine_10",   "10-ref"),
     ("fs_iter_10",           "10-ref"),
     ("fs_iter_refine_10",    "10-ref"),
-    ("tg",                   "Text-guided"),
 ]
 
 
