@@ -51,20 +51,28 @@ for cfg in configs/datasets/synthetic_curves/*.yaml; do
     fi
 done
 
-# ---- Step 3: run pipeline on all 25 datasets ----------------------
+# ---- Step 3: run pipeline across all versions × 25 datasets ----------
 echo ""
-echo "[Step 3/4] Running pipeline + evaluation on 25 datasets ..."
-bash run_synthetic_curves.sh "$VERSION"
+echo "[Step 3/4] Running pipeline + evaluation across versions ..."
+bash run_synthetic_curves_versions.sh
 
-# ---- Step 4: produce curves analysis ------------------------------
+# ---- Step 4: produce per-version curves + cross-version comparison ---
 echo ""
-echo "[Step 4/4] Generating curve plots and consolidated CSV ..."
-python data/scripts/analyze_curves.py \
-    --results-root "results/${VERSION}/" \
-    --output "results/${VERSION}/curves_analysis/"
+echo "[Step 4/4] Generating curve plots ..."
+# Per-version curves (current behavior, one set of 5 figures per version)
+for vdir in results/v*_*/; do
+    vname=$(basename "$vdir")
+    if [ -d "$vdir" ]; then
+        echo "  Analyzing $vname ..."
+        python data/scripts/analyze_curves.py \
+            --results-root "$vdir" \
+            --output "${vdir}curves_analysis/"
+    fi
+done
 
 echo ""
 echo "================================================================"
 echo "  Overnight run finished at $(date)"
-echo "  Plots: results/${VERSION}/curves_analysis/"
+echo "  Per-version plots: results/<version>/curves_analysis/"
+echo "  Versions run: see results/ subdirectories"
 echo "================================================================"
