@@ -19,21 +19,7 @@ from sklearn.neighbors import NearestNeighbors
 
 from project.core.interfaces import Labeler
 from project.core.data_types import SegmentedObject, LabeledObject
-
-
-FEATURE_NAMES = [
-    # --- Kervadec et al. (original 6) ---
-    "V", "Cx", "Cy", "Dx", "Dy", "L",
-    # --- Shape descriptors ---
-    "ecc", "solidity", "extent", "compact",
-    # --- Hu moments (log-transformed) ---
-    "hu0", "hu1", "hu2",
-    # --- Intensity statistics ---
-    "intensity_mean", "intensity_std",
-    # --- Orientation ---
-    "orientation",
-]
-FEATURE_INDEX = {name: i for i, name in enumerate(FEATURE_NAMES)}
+from project.feature_extraction.feature_names import FEATURE_NAMES, FEATURE_INDEX
 
 
 class ClusteringAlgorithm(Enum):

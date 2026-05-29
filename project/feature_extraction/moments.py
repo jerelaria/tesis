@@ -3,6 +3,7 @@ from skimage.measure import regionprops
 
 from project.core.interfaces import FeatureExtractor
 from project.core.data_types import SegmentedObject
+from project.feature_extraction.feature_names import FEATURE_NAMES as _FEATURE_NAMES
 
 
 class MomentFeatureExtractor(FeatureExtractor):
@@ -24,18 +25,7 @@ class MomentFeatureExtractor(FeatureExtractor):
          intensity_mean, intensity_std, orientation] # Intensity + orient (3)
     """
 
-    FEATURE_NAMES = [
-        # --- Kervadec et al. (original 6) ---
-        "V", "Cx", "Cy", "Dx", "Dy", "L",
-        # --- Shape descriptors ---
-        "ecc", "solidity", "extent", "compact",
-        # --- Hu moments (log-transformed) ---
-        "hu0", "hu1", "hu2",
-        # --- Intensity statistics ---
-        "intensity_mean", "intensity_std",
-        # --- Orientation ---
-        "orientation",
-    ]
+    FEATURE_NAMES = _FEATURE_NAMES
 
     def extract(self, obj: SegmentedObject) -> np.ndarray:
         """

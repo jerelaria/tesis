@@ -82,67 +82,9 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from collections import defaultdict
 
-
-# ---------------------------------------------------------------------------
-# Display constants
-# ---------------------------------------------------------------------------
-
-DISPLAY_NAMES = {
-    # --- Unsupervised ---
-    "unsup_baseline":         "Grid Prompting",
-    "unsup_kmeans":           "KMeans",
-    "unsup_hdbscan":          "HDBSCAN",
-    "unsup_kmeans_refine":    "KMeans + Refine",
-    "unsup_hdbscan_refine":   "HDBSCAN + Refine",
-    # --- Few-shot baselines ---
-    "fs_indep_baseline_1ref":  "SAM2 Video (1 ref)",
-    "fs_indep_baseline_3ref":  "SAM2 Video (3 ref)",
-    "fs_indep_baseline_5ref":  "SAM2 Video (5 ref)",
-    "fs_indep_baseline_10ref": "SAM2 Video (10 ref)",
-    # --- Few-shot independent ---
-    "fs_indep_1ref":           "Independent (1 ref)",
-    "fs_indep_3ref":           "Independent (3 ref)",
-    "fs_indep_5ref":           "Independent (5 ref)",
-    "fs_indep_10ref":          "Independent (10 ref)",
-    "fs_indep_refine_1ref":    "Indep + Refine (1 ref)",
-    "fs_indep_refine_3ref":    "Indep + Refine (3 ref)",
-    "fs_indep_refine_5ref":    "Indep + Refine (5 ref)",
-    "fs_indep_refine_10ref":   "Indep + Refine (10 ref)",
-    # --- Few-shot iterative ---
-    "fs_iter_1ref":            "Iterative (1 ref)",
-    "fs_iter_3ref":            "Iterative (3 ref)",
-    "fs_iter_5ref":            "Iterative (5 ref)",
-    "fs_iter_10ref":           "Iterative (10 ref)",
-    "fs_iter_refine_1ref":     "Iter + Refine (1 ref)",
-    "fs_iter_refine_3ref":     "Iter + Refine (3 ref)",
-    "fs_iter_refine_5ref":     "Iter + Refine (5 ref)",
-    "fs_iter_refine_10ref":    "Iter + Refine (10 ref)",
-}
-
-# Canonical display order: grouped by approach, then by ref count.
-# Unknown experiments are appended alphabetically at the end.
-EXPERIMENT_ORDER = [
-    # Unsupervised
-    "unsup_baseline",
-    "unsup_kmeans",            "unsup_kmeans_refine",
-    "unsup_hdbscan",           "unsup_hdbscan_refine",
-    # Few-shot 1-ref (baseline first, then pipeline variants)
-    "fs_indep_baseline_1ref",
-    "fs_indep_1ref",           "fs_indep_refine_1ref",
-    "fs_iter_1ref",            "fs_iter_refine_1ref",
-    # Few-shot 3-ref
-    "fs_indep_baseline_3ref",
-    "fs_indep_3ref",           "fs_indep_refine_3ref",
-    "fs_iter_3ref",            "fs_iter_refine_3ref",
-    # Few-shot 5-ref
-    "fs_indep_baseline_5ref",
-    "fs_indep_5ref",           "fs_indep_refine_5ref",
-    "fs_iter_5ref",            "fs_iter_refine_5ref",
-    # Few-shot 10-ref
-    "fs_indep_baseline_10ref",
-    "fs_indep_10ref",          "fs_indep_refine_10ref",
-    "fs_iter_10ref",           "fs_iter_refine_10ref",
-]
+from project.evaluation.display_names import (
+    DISPLAY_NAMES, EXPERIMENT_ORDER, get_display_name,
+)
 
 # Classify each experiment into a group for visual separators.
 # Groups are detected by prefix; order matches EXPERIMENT_ORDER.
@@ -290,10 +232,6 @@ def _metric_cmap(metric: str) -> str:
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
-
-def _get_display_name(name: str) -> str:
-    return DISPLAY_NAMES.get(name, name)
-
 
 def _sort_experiments(experiments: list[str]) -> list[str]:
     order_map = {name: i for i, name in enumerate(EXPERIMENT_ORDER)}
@@ -609,7 +547,7 @@ def plot_metric_heatmap_per_dataset(
         ax.set_xticklabels(versions, fontsize=10, rotation=30, ha="right")
         ax.set_yticks(range(len(experiments)))
         ax.set_yticklabels(
-            [_get_display_name(e) for e in experiments], fontsize=9,
+            [get_display_name(e) for e in experiments], fontsize=9,
         )
         ax.set_title(f"Global {label} — {dataset}",
                      fontsize=14, fontweight="bold")
@@ -703,7 +641,7 @@ def plot_cross_dataset_heatmap(
         ax.set_xticklabels(short_labels, fontsize=10, rotation=20, ha="right")
         ax.set_yticks(range(len(experiments)))
         ax.set_yticklabels(
-            [_get_display_name(e) for e in experiments], fontsize=9,
+            [get_display_name(e) for e in experiments], fontsize=9,
         )
         ax.set_title(
             f"Cross-dataset Global {label} — {version}",
@@ -786,7 +724,7 @@ def _plot_single_organ_heatmap(
     ax.set_xticklabels(versions, fontsize=10, rotation=30, ha="right")
     ax.set_yticks(range(len(experiments)))
     ax.set_yticklabels(
-        [_get_display_name(e) for e in experiments], fontsize=9,
+        [get_display_name(e) for e in experiments], fontsize=9,
     )
     ax.set_title(f"{label} — {panel_title} — {dataset}",
                  fontsize=13, fontweight="bold")
@@ -990,7 +928,7 @@ def plot_metric_story(
             )
             ax.set_xticks(x)
             ax.set_xticklabels(
-                [_get_display_name(e) for e in experiments],
+                [get_display_name(e) for e in experiments],
                 fontsize=8, rotation=35, ha="right",
             )
 
@@ -1131,9 +1069,9 @@ def plot_delta_vs_baseline_heatmap(
 
         y_labels = []
         for ref_exp, equiv_name, _ in expanded:
-            display = _get_display_name(equiv_name)
+            display = get_display_name(equiv_name)
             if equiv_name != ref_exp:
-                ref_display = _get_display_name(ref_exp)
+                ref_display = get_display_name(ref_exp)
                 y_labels.append(f"{display}\n(ref: {ref_display})")
             else:
                 y_labels.append(display)
@@ -1360,7 +1298,7 @@ def plot_experiment_across_versions(
         for exp_entry in target_experiments:
             # Resolve candidate names and display label
             candidates = [exp_entry] if isinstance(exp_entry, str) else exp_entry
-            display_name = _get_display_name(candidates[0])
+            display_name = get_display_name(candidates[0])
             file_slug = candidates[0]
 
             # When two entries share the same baseline anchor (candidates[0])
@@ -1491,7 +1429,7 @@ def plot_experiment_across_versions(
             # differs from the group's display name (e.g. baseline vs pipeline).
             x_labels = []
             for v, matched in zip(present_versions, matched_experiments):
-                matched_display = _get_display_name(matched) if matched else ""
+                matched_display = get_display_name(matched) if matched else ""
                 if matched and matched_display != display_name:
                     x_labels.append(f"{v}\n({matched_display})")
                 else:
@@ -1734,13 +1672,13 @@ def plot_organ_recovery(
                 ax.axhline(y=0, color="black", linewidth=0.8)
                 ax.set_ylabel("Organ instances", fontsize=12)
                 ax.set_title(
-                    f"Organ Recovery vs {_get_display_name(baseline_exp)}"
+                    f"Organ Recovery vs {get_display_name(baseline_exp)}"
                     f" — {dataset} / {version}",
                     fontsize=13, fontweight="bold",
                 )
                 ax.set_xticks(x)
                 ax.set_xticklabels(
-                    [_get_display_name(l) for l in labels],
+                    [get_display_name(l) for l in labels],
                     fontsize=9, rotation=20, ha="right",
                 )
                 ax.legend(fontsize=10)
@@ -1791,7 +1729,7 @@ def plot_organ_recovery(
                     ax2.set_title("Recovery quality")
 
                     fig.suptitle(
-                        f"Recovery by Organ — {_get_display_name(best_exp)}"
+                        f"Recovery by Organ — {get_display_name(best_exp)}"
                         f" — {dataset} / {version}",
                         fontsize=13, fontweight="bold",
                     )
@@ -1944,7 +1882,7 @@ def plot_box_plots_per_organ(
                         values = dice_by_exp.get(exp, {}).get(organ, [])
                         if values:
                             box_data.append(values)
-                            box_labels.append(_get_display_name(exp))
+                            box_labels.append(get_display_name(exp))
                             box_colors.append(colors[idx % len(colors)])
 
                     if len(box_data) < 2:

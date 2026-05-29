@@ -59,33 +59,13 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import numpy as np
 
+from project.evaluation.display_names import get_display_name
+
 
 # ---------------------------------------------------------------------------
-# Display constants (kept in sync with compare_versions.py)
-# ---------------------------------------------------------------------------
-
-DISPLAY_NAMES = {
-    # Unsupervised
-    "unsup_baseline":         "Grid Prompting",
-    "unsup_hdbscan":          "HDBSCAN",
-    "unsup_hdbscan_refine":   "HDBSCAN + Refine",
-    "unsup_kmeans":           "KMeans",
-    "unsup_kmeans_refine":    "KMeans + Refine",
-    # Few-shot baselines
-    "fs_indep_baseline_1ref": "SAM2 Video (1 ref)",
-    "fs_indep_baseline_3ref": "SAM2 Video (3 ref)",
-    # Few-shot pipelines
-    "fs_indep_1ref":          "Independent (1 ref)",
-    "fs_indep_3ref":          "Independent (3 ref)",
-    "fs_indep_refine_1ref":   "Indep + Refine (1 ref)",
-    "fs_indep_refine_3ref":   "Indep + Refine (3 ref)",
-    "fs_iter_1ref":           "Iterative (1 ref)",
-    "fs_iter_3ref":           "Iterative (3 ref)",
-    "fs_iter_refine_1ref":    "Iter + Refine (1 ref)",
-    "fs_iter_refine_3ref":    "Iter + Refine (3 ref)",
-}
-
 # Pairs for overlay mode: baseline -> pipeline variants to compare against.
+# ---------------------------------------------------------------------------
+
 OVERLAY_PAIRS_UNSUP = {
     "unsup_baseline": ["unsup_hdbscan_refine"],
 }
@@ -94,10 +74,6 @@ OVERLAY_PAIRS_FS = {
     "fs_indep_baseline_1ref": ["fs_iter_refine_1ref"],
     "fs_indep_baseline_3ref": ["fs_iter_refine_3ref"],
 }
-
-
-def _get_display_name(name: str) -> str:
-    return DISPLAY_NAMES.get(name, name)
 
 
 # ---------------------------------------------------------------------------
@@ -333,7 +309,7 @@ def plot_per_experiment(
                     continue
 
                 title = (
-                    f"{_get_display_name(exp)}  |  "
+                    f"{get_display_name(exp)}  |  "
                     f"{dataset}  |  {version}"
                 )
                 out_path = (
@@ -472,8 +448,8 @@ def plot_overlays(
                     pipeline_data = _dice_by_organ_split(pipe_rows)
 
                     title = (
-                        f"{_get_display_name(baseline_exp)}  ->  "
-                        f"{_get_display_name(pipe_exp)}  |  "
+                        f"{get_display_name(baseline_exp)}  ->  "
+                        f"{get_display_name(pipe_exp)}  |  "
                         f"{dataset}  |  {version}"
                     )
                     out_path = (
@@ -483,8 +459,8 @@ def plot_overlays(
                     )
                     _plot_overlay_grid(
                         baseline_data, pipeline_data,
-                        baseline_label=_get_display_name(baseline_exp),
-                        pipeline_label=_get_display_name(pipe_exp),
+                        baseline_label=get_display_name(baseline_exp),
+                        pipeline_label=get_display_name(pipe_exp),
                         title=title,
                         out_path=out_path,
                     )

@@ -26,32 +26,14 @@ import matplotlib.ticker as mticker
 import csv
 from pathlib import Path
 
+from project.evaluation.display_names import (
+    EXPERIMENT_ORDER, MODE_COLORS, get_display_name,
+)
+
 
 # ---------------------------------------------------------------------------
 # Styling
 # ---------------------------------------------------------------------------
-
-# Experiment display names (short labels for plots)
-DISPLAY_NAMES = {
-    "unsup_kmeans": "Unsup\nKMeans",
-    "unsup_hdbscan": "Unsup\nHDBSCAN",
-    "unsup_kmeans_refine": "Unsup\nKMeans+R",
-    "unsup_hdbscan_refine": "Unsup\nHDBSCAN+R",
-    "fs_indep_1ref": "Indep\n1ref",
-    "fs_indep_1ref_refine": "Indep\n1ref+R",
-    "fs_indep_4ref": "Indep\n4ref",
-    "fs_indep_4ref_refine": "Indep\n4ref+R",
-    "fs_iter_1ref": "Iter\n1ref",
-    "fs_iter_4ref": "Iter\n4ref",
-    "fs_iter_4ref_refine": "Iter\n4ref+R",
-}
-
-# Color palette: group by supervision mode
-MODE_COLORS = {
-    "unsup": "#5B8DB8",
-    "fs_indep": "#E8A838",
-    "fs_iter": "#6BBF6B",
-}
 
 def _get_color(name: str) -> str:
     for prefix, color in MODE_COLORS.items():
@@ -61,17 +43,7 @@ def _get_color(name: str) -> str:
 
 
 def _get_display_name(name: str) -> str:
-    return DISPLAY_NAMES.get(name, name)
-
-
-# Ordered list for consistent x-axis
-EXPERIMENT_ORDER = [
-    "unsup_kmeans", "unsup_hdbscan",
-    "unsup_kmeans_refine", "unsup_hdbscan_refine",
-    "fs_indep_1ref", "fs_indep_1ref_refine",
-    "fs_indep_4ref", "fs_indep_4ref_refine",
-    "fs_iter_1ref", "fs_iter_4ref", "fs_iter_4ref_refine",
-]
+    return get_display_name(name)
 
 
 # ---------------------------------------------------------------------------
