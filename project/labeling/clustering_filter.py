@@ -1,8 +1,11 @@
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from collections import defaultdict
 
 from project.core.data_types import LabeledObject
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -64,7 +67,7 @@ class ClusterFilter:
         bad_cluster_ids = self._find_bad_clusters(all_labeled, total_images)
 
         if bad_cluster_ids:
-            print(f"  Clusters marked as noise: {sorted(bad_cluster_ids)}")
+            logger.info(f"Clusters marked as noise: {sorted(bad_cluster_ids)}")
 
         # Mark noise in-place
         for obj in all_labeled:
@@ -89,10 +92,10 @@ class ClusterFilter:
             objects = [obj for obj in all_labeled if obj.organ_id == cid]
             metrics = self._compute_cluster_metrics(objects, total_images)
 
-            print(f"  cluster_{cid}: "
-                  f"image_freq={metrics['image_frequency']:.2f}, "
-                  f"avg_labeling_confidence={metrics['avg_labeling_confidence']:.2f}, "
-                  f"avg_sam_confidence={metrics['avg_sam_confidence']:.2f}")
+            logger.debug(f"cluster_{cid}: "
+                         f"image_freq={metrics['image_frequency']:.2f}, "
+                         f"avg_labeling_confidence={metrics['avg_labeling_confidence']:.2f}, "
+                         f"avg_sam_confidence={metrics['avg_sam_confidence']:.2f}")
 
             failed = []
             if metrics["image_frequency"] < self.config.min_image_frequency:
@@ -103,7 +106,7 @@ class ClusterFilter:
                 failed.append(f"avg_sam_confidence={metrics['avg_sam_confidence']:.2f} < {self.config.min_avg_sam_confidence}")
 
             if failed:
-                print(f"  cluster_{cid} discarded → {', '.join(failed)}")
+                logger.info(f"cluster_{cid} discarded: {', '.join(failed)}")
                 bad.add(cid)
 
         return bad
@@ -198,16 +201,16 @@ class ClusterFilter:
                     total_removed += 1
  
                 best_score = self._combined_score(best, alpha)
-                print(
-                    f"  {path.name}: cluster_{cid} had {len(group)} objects, "
+                logger.debug(
+                    f"{path.name}: cluster_{cid} had {len(group)} objects, "
                     f"kept best (score={best_score:.3f}), "
                     f"marked {len(duplicates)} as noise"
                 )
- 
+
         if total_removed > 0:
-            print(f"  Deduplication: {total_removed} duplicate objects marked as noise")
+            logger.info(f"Deduplication: {total_removed} duplicate objects marked as noise")
         else:
-            print("  Deduplication: no duplicates found")
+            logger.info("Deduplication: no duplicates found")
  
         return labeled_by_image
  

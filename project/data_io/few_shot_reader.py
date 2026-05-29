@@ -28,11 +28,13 @@ Convention: every .png file in a reference directory that is NOT image.png
 is treated as an organ mask. The filename stem becomes the organ name.
 """
 
+import logging
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass
 from PIL import Image
 
+logger = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -127,12 +129,11 @@ def discover_few_shot_references(
         )
 
     if len(selected_names) < num_refs:
-        print(f"  [WARN] Requested {num_refs} references but only "
-              f"{len(selected_names)} available. Using all.")
+        logger.warning(f"Requested {num_refs} references but only "
+                       f"{len(selected_names)} available. Using all.")
 
     # Load each selected reference
-    print(f"\n  Loading {len(selected_names)} few-shot references "
-          f"from {fs_dir}:")
+    logger.info(f"Loading {len(selected_names)} few-shot references from {fs_dir}:")
     results: list[FewShotReference] = []
 
     for i, name in enumerate(selected_names):
@@ -150,8 +151,8 @@ def discover_few_shot_references(
         for organ in ref.masks:
             all_organs[organ] = all_organs.get(organ, 0) + 1
 
-    print(f"  Loaded {len(results)} references covering: "
-          f"{', '.join(f'{k}(x{v})' for k, v in sorted(all_organs.items()))}")
+    logger.info(f"Loaded {len(results)} references covering: "
+                f"{', '.join(f'{k}(x{v})' for k, v in sorted(all_organs.items()))}")
 
     return results
 
@@ -238,7 +239,7 @@ def _select_references(
         if name in available_set and name not in selected:
             selected.append(name)
         elif name not in available_set:
-            print(f"  [WARN] Requested reference '{name}' not found, skipping")
+            logger.warning(f"Requested reference '{name}' not found, skipping")
 
     # Fill remaining slots from available (alphabetically), excluding selected
     if len(selected) < num_refs:
@@ -264,14 +265,14 @@ def _load_single_reference(ref_dir: Path, index: int) -> FewShotReference | None
     if not image_path.exists():
         image_path = ref_dir / "image.jpg"
         if not image_path.exists():
-            print(f"    [WARN] No image.png/jpg in {ref_dir.name}, skipping")
+            logger.warning(f"No image.png/jpg in {ref_dir.name}, skipping")
             return None
 
     img = Image.open(image_path).convert("RGB")
     volume = np.array(img, dtype=np.float32)
     h, w = volume.shape[:2]
 
-    print(f"  Reference {index}: {ref_dir.name} ({w}x{h})")
+    logger.debug(f"Reference {index}: {ref_dir.name} ({w}x{h})")
 
     # Auto-detect masks: every .png that is not image.png
     masks: dict[str, np.ndarray] = {}
@@ -287,21 +288,21 @@ def _load_single_reference(ref_dir: Path, index: int) -> FewShotReference | None
         mask_array = np.array(mask_img)
 
         if mask_array.shape != (h, w):
-            print(f"    [WARN] Mask '{organ_name}' shape {mask_array.shape} != "
-                  f"image ({h}, {w}), skipping")
+            logger.warning(f"Mask '{organ_name}' shape {mask_array.shape} != "
+                           f"image ({h}, {w}), skipping")
             continue
 
         binary = mask_array > 127
         if not binary.any():
-            print(f"    [WARN] Mask '{organ_name}' is empty, skipping")
+            logger.warning(f"Mask '{organ_name}' is empty, skipping")
             continue
 
         masks[organ_name] = binary
         pct = 100 * binary.sum() / (h * w)
-        print(f"    {organ_name}: {binary.sum()} px ({pct:.1f}%)")
+        logger.debug(f"  {organ_name}: {binary.sum()} px ({pct:.1f}%)")
 
     if not masks:
-        print(f"    [WARN] No valid masks in {ref_dir.name}, skipping")
+        logger.warning(f"No valid masks in {ref_dir.name}, skipping")
         return None
 
     return FewShotReference(
