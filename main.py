@@ -1,113 +1,67 @@
-"""
-Main entry point for the co-segmentation and anatomical labeling pipeline.
+"""CLI entry point. Loads YAML, builds Pipeline, runs it, saves results."""
 
-Supports two modes configured via YAML:
-- unsupervised: grid-based segmentation + clustering + optional refinement
-- few_shot: video predictor with K reference images + clustering + semantic mapping
-
-Few-shot propagation modes:
-- independent: (K+1)-frame video per target (K refs + 1 target). Order-invariant.
-- iterative: (K+N)-frame video (K refs + all targets). Memory accumulates.
-
-Usage:
-    python -m main --config configs/experiments/experiment.yaml \\
-        --dataset XRayNicoSent/images --output-dir results/v1/exp_name
-
-    # With few-shot:
-    python -m main --config configs/experiments/fs_indep.yaml \\
-        --dataset XRayNicoSent/images --output-dir results/v1/fs_indep_4ref \\
-        --num-refs 4 --ref-images ref_001 ref_002
-
-    # With config overrides:
-    python -m main --config configs/experiments/unsup_kmeans.yaml \\
-        --dataset Sunnybrook/images --output-dir results/v1/unsup_test \\
-        --override segmenter.score_threshold=0.6 refinement.enabled=true
-"""
-
-import yaml
-import json
-import logging
 import argparse
-import numpy as np
+import logging
 from pathlib import Path
 
+import yaml
+
+from project.core.config_utils import apply_config_overrides, save_resolved_config
 from project.core.logging_setup import setup_logging
+from project.data_io.utils import load_image_paths
+from project.pipeline.orchestrator import build_pipeline_from_config
 
 logger = logging.getLogger(__name__)
 
-from project.data_io.reader import MedicalImageReader
-from project.data_io.utils import load_image_paths
-from project.core.config_utils import apply_config_overrides, save_resolved_config
-from project.segmentation.medsam2 import MedSAM2Segmenter, MedSAM2Config
-from project.feature_extraction.moments import MomentFeatureExtractor
-from project.feature_extraction.embedding import extract_sam2_embedding
-from project.labeling.clustering import ClusteringLabeler, ClusteringConfig
-from project.labeling.clustering_filter import ClusterFilter, ClusterFilterConfig
-from project.evaluation.visualizer import (
-    save_segmentation_vis,
-    save_visualization,
-)
+
+def _exclude_few_shot_images(image_paths: list[Path], references: list) -> list[Path]:
+    ref_ids = set()
+    for ref in references:
+        p = Path(ref.source_path)
+        ref_ids.add(p.parent.name)
+        ref_ids.add(p.stem)
+    original = len(image_paths)
+    filtered = [p for p in image_paths if p.stem not in ref_ids]
+    excluded = original - len(filtered)
+    if excluded > 0:
+        logger.info(f"Excluded {excluded} images matching few-shot references")
+    else:
+        logger.info("No dataset images matched few-shot references (0 excluded)")
+    return filtered
 
 
-def main(
-    config_path: str,
-    dataset: str,
-    output_dir: str,
-    max_images: int | None = None,
-    num_refs: int | None = None,
-    ref_images: list[str] | None = None,
-    overrides: list[str] | None = None,
-):
-    with open(config_path) as f:
+def main(args) -> None:
+    setup_logging(verbose=args.verbose)
+    with open(args.config) as f:
         cfg = yaml.safe_load(f)
-
-    # Apply CLI overrides to config
-    if overrides:
-        apply_config_overrides(cfg, overrides)
-
+    if args.override:
+        apply_config_overrides(cfg, args.override)
     mode = cfg.get("mode", "unsupervised")
     logger.info(f"Mode: {mode}")
     logger.info(f"Experiment: {cfg.get('experiment', {}).get('name', 'unnamed')}")
-    logger.info(f"Dataset: {dataset}")
+    logger.info(f"Dataset: {args.dataset}")
 
-    # Load dataset image paths
     extensions = cfg.get("dataset", {}).get("extensions", ["png"])
-    image_paths = load_image_paths(dataset, extensions)
-
-    if max_images is not None:
-        image_paths = image_paths[:max_images]
-
+    image_paths = load_image_paths(args.dataset, extensions)
+    if args.max_images is not None:
+        image_paths = image_paths[: args.max_images]
     if not image_paths:
-        raise FileNotFoundError(f"No images found for dataset '{dataset}'")
-
+        raise FileNotFoundError(f"No images found for dataset '{args.dataset}'")
     logger.info(f"Found {len(image_paths)} images.")
 
-    results_dir = Path(output_dir)
-    results_dir.mkdir(parents=True, exist_ok=True)
-
-    # Few-shot: load references and exclude them from the dataset
-    references = None
-    references_info = None
+    references, references_info = None, None
     if mode == "few_shot":
-        if num_refs is None:
-            raise ValueError(
-                "--num-refs is required for few_shot mode. "
-                "Specify the number of reference images to use."
-            )
-
+        if args.num_refs is None:
+            raise ValueError("--num-refs is required for few_shot mode.")
         from project.data_io.few_shot_reader import discover_few_shot_references
-
-        logger.info(f"Loading few-shot references (K={num_refs})...")
+        logger.info(f"Loading few-shot references (K={args.num_refs})...")
         references = discover_few_shot_references(
-            dataset_name=dataset,
-            num_refs=num_refs,
-            ref_names=ref_images,
+            dataset_name=args.dataset,
+            num_refs=args.num_refs,
+            ref_names=args.ref_images,
         )
-
-        # Exclude reference images from the dataset
         image_paths = _exclude_few_shot_images(image_paths, references)
         logger.info(f"Dataset after exclusion: {len(image_paths)} images")
-
         references_info = {
             "num_refs": len(references),
             "ref_sources": [r.source_path for r in references],
@@ -117,636 +71,29 @@ def main(
             },
         }
 
-    num_images = len(image_paths)
-
-    # Future: text_guided mode (MedSAM3 with text prompts) can be reintroduced
-    # here. See archived implementation in git tag 'pre-refactor' or in
-    # project/segmentation/medsam3.py at that commit.
-    if mode in ("unsupervised", "few_shot"):
-        _run_unsupervised_or_fewshot(
-            cfg, mode, image_paths, results_dir, references, num_images,
-        )
-    else:
-        raise ValueError(
-            f"Unknown mode: '{mode}'. "
-            "Must be one of: unsupervised, few_shot"
-        )
-
-    # Save resolved config for reproducibility
+    results_dir = Path(args.output_dir)
+    results_dir.mkdir(parents=True, exist_ok=True)
+    pipeline = build_pipeline_from_config(cfg, results_dir, len(image_paths), references)
+    pipeline.run(image_paths, references=references)
     save_resolved_config(
         cfg=cfg,
         results_dir=results_dir,
-        config_path=config_path,
-        dataset_name=dataset,
-        num_images=num_images,
+        config_path=args.config,
+        dataset_name=args.dataset,
+        num_images=len(image_paths),
         references_info=references_info,
     )
 
 
-# ======================================================================
-# FEW-SHOT IMAGE EXCLUSION
-# ======================================================================
-
-def _exclude_few_shot_images(
-    image_paths: list[Path],
-    references: list,
-) -> list[Path]:
-    """
-    Remove dataset images that match any few-shot reference source.
-
-    Matching is by filename stem to handle different directory locations.
-    The reference source_path points to data/few_shot/{dataset}/{ref_name}/image.png,
-    so we match the dataset image stem against the reference directory name.
-    """
-    ref_identifiers = set()
-    for ref in references:
-        ref_path = Path(ref.source_path)
-        ref_identifiers.add(ref_path.parent.name)
-        ref_identifiers.add(ref_path.stem)
-
-    original_count = len(image_paths)
-    filtered = [p for p in image_paths if p.stem not in ref_identifiers]
-    excluded = original_count - len(filtered)
-
-    if excluded > 0:
-        logger.info(f"Excluded {excluded} images matching few-shot references")
-    else:
-        logger.info("No dataset images matched few-shot references (0 excluded)")
-
-    return filtered
-
-
-# ======================================================================
-# UNSUPERVISED / FEW-SHOT PIPELINE
-# ======================================================================
-
-def _run_unsupervised_or_fewshot(
-    cfg: dict,
-    mode: str,
-    image_paths: list[Path],
-    results_dir: Path,
-    references: list | None,
-    num_images: int,
-):
-    reader = MedicalImageReader()
-    extractor = MomentFeatureExtractor()
-
-    # Clustering can be disabled in few-shot and unsupervised modes to
-    # benchmark raw MedSAM2 output as a minimal-pipeline baseline.
-    clustering_enabled = True
-    if mode == "few_shot":
-        clustering_enabled = cfg.get("few_shot", {}).get(
-            "clustering_enabled", True
-        )
-    elif mode == "unsupervised":
-        clustering_enabled = cfg.get("unsupervised", {}).get(
-            "clustering_enabled", True
-        )
-
-    labeler = None
-    if clustering_enabled:
-        # Infer n_clusters from few-shot reference masks
-        if mode == "few_shot" and references:
-            organ_names = set()
-            for ref in references:
-                organ_names.update(ref.masks.keys())
-            n_clusters = len(organ_names)
-            cfg.setdefault("labeler", {})
-            cfg["labeler"].setdefault("kmeans", {})
-            cfg["labeler"]["kmeans"]["n_clusters"] = n_clusters
-            logger.info(f"Inferred n_clusters={n_clusters} from references: "
-                        f"{sorted(organ_names)}")
-
-        # Build labeler with adaptive HDBSCAN resolution
-        labeler = ClusteringLabeler(ClusteringConfig(**cfg["labeler"]))
-        labeler.resolve_adaptive_params(num_images)
-    else:
-        logger.info("[BASELINE] clustering_enabled=false -> "
-                    "skipping phases 2-5, using MedSAM2 labels directly")
-
-    seg_cfg = dict(cfg["segmenter"])
-    seg_cfg.pop("model", None)
-    segmenter = MedSAM2Segmenter(MedSAM2Config(**seg_cfg))
-
-    # Check if embedding extraction is enabled in labeler config
-    extract_embeddings = (
-        cfg.get("labeler", {}).get("embedding", {}).get("enabled", False)
-    )
-    if extract_embeddings:
-        logger.info("Embedding extraction: ENABLED")
-
-    # Resolve propagation mode from config
-    propagation_mode = "independent"
-    if mode == "few_shot":
-        fs_cfg = cfg.get("few_shot", {})
-        propagation_mode = fs_cfg.get("propagation_mode", "independent")
-        logger.info(f"Propagation mode: {propagation_mode}")
-
-    # Log feature configuration for clarity
-    labeler_features = cfg.get("labeler", {}).get("features", None)
-    if labeler_features is None:
-        logger.info("Moment features: NONE (embeddings-only mode)")
-    else:
-        logger.info(f"Moment features: {len(labeler.config.features)} selected")
-
-    # ------------------------------------------------------------------
-    # Phase 1: Segmentation + Feature Extraction
-    # ------------------------------------------------------------------
-    logger.info("=" * 60)
-    logger.info("Phase 1: Segmentation + Feature Extraction")
-    logger.info("=" * 60)
-
-    phase1_dir = results_dir / "phase1_segmentation"
-    phase1_dir.mkdir(exist_ok=True)
-
-    if mode == "unsupervised":
-        all_objects, objects_by_image = _phase1_unsupervised(
-            image_paths, reader, segmenter, extractor, phase1_dir,
-            extract_embeddings=extract_embeddings,
-        )
-    elif propagation_mode == "independent":
-        all_objects, objects_by_image = _phase1_few_shot_independent(
-            image_paths, reader, segmenter, extractor, references, phase1_dir,
-            extract_embeddings=extract_embeddings,
-        )
-    elif propagation_mode == "iterative":
-        all_objects, objects_by_image = _phase1_few_shot_iterative(
-            image_paths, reader, segmenter, extractor, references, phase1_dir,
-            extract_embeddings=extract_embeddings,
-        )
-    else:
-        raise ValueError(f"Unknown propagation mode: '{propagation_mode}'")
-
-    logger.info(f"Total objects: {len(all_objects)}")
-
-    # ------------------------------------------------------------------
-    # Baseline early-exit: no post-processing, use MedSAM2 labels directly
-    # ------------------------------------------------------------------
-    if not clustering_enabled:
-        from project.core.data_types import LabeledObject
-
-        # Few-shot: use organ names from reference masks (propagated by video
-        # predictor as obj.label). Unsupervised: no labels available, so each
-        # object gets a unique synthetic name (obj_000, obj_001, ...) for
-        # traceability. The hungarian matcher in evaluate.py ignores names
-        # and matches by IoU alone.
-        organ_name_to_id: dict[str, int] = {}
-        if mode == "few_shot" and references is not None:
-            for ref in references:
-                for name in ref.masks:
-                    if name not in organ_name_to_id:
-                        organ_name_to_id[name] = len(organ_name_to_id) + 1
-
-        baseline_tag = (
-            "few_shot_baseline" if mode == "few_shot"
-            else "unsupervised_baseline"
-        )
-
-        labeled_by_image = {}
-        for path, objects in objects_by_image.items():
-            labeled = []
-            for local_idx, obj in enumerate(objects):
-                if mode == "few_shot":
-                    organ_name = obj.label or "unknown"
-                    organ_id = organ_name_to_id.get(obj.label, 0)
-                else:
-                    # Unsupervised: synthesize a unique name per object so
-                    # _save_predicted_masks writes one PNG per mask without
-                    # collisions. Names are purely positional.
-                    organ_name = f"obj_{local_idx:03d}"
-                    organ_id = local_idx
-
-                labeled.append(LabeledObject(
-                    segmented_object=obj,
-                    organ_id=organ_id,
-                    organ_name=organ_name,
-                    labeling_confidence=obj.confidence or 0.0,
-                    method_used=baseline_tag,
-                ))
-            labeled_by_image[path] = labeled
-
-        _save_predicted_masks(labeled_by_image, results_dir)
-        _print_summary(all_objects, labeled_by_image)
-        return
-
-    # ------------------------------------------------------------------
-    # Phase 2: Clustering
-    # ------------------------------------------------------------------
-    logger.info("=" * 60)
-    logger.info("Phase 2: Clustering")
-    logger.info("=" * 60)
-
-    phase2_dir = results_dir / "phase2_clustering"
-    phase2_dir.mkdir(exist_ok=True)
-
-    labeler.debug_dir = results_dir / "phase2_clustering"
-
-    labeler.fit(all_objects)
-
-    labeled_by_image = {}
-    for path, objects in objects_by_image.items():
-        labeled = labeler.label(objects)
-        labeled_by_image[path] = labeled
-        save_visualization(path, labeled, phase2_dir, suffix="_clustered")
-
-    # ------------------------------------------------------------------
-    # Phase 3: Semantic Cluster Mapping (few-shot only)
-    # ------------------------------------------------------------------
-    if mode == "few_shot":
-        logger.info("=" * 60)
-        logger.info("Phase 3: Semantic Cluster Mapping")
-        logger.info("=" * 60)
-
-        from project.labeling.semantic_mapper import ClusterSemanticMapper
-
-        phase3_dir = results_dir / "phase3_semantic"
-        phase3_dir.mkdir(exist_ok=True)
-
-        semantic_mapper = ClusterSemanticMapper()
-        labeled_by_image = semantic_mapper.map(labeled_by_image)
-
-        for path, labeled in labeled_by_image.items():
-            save_visualization(path, labeled, phase3_dir, suffix="_semantic")
-
-    # ------------------------------------------------------------------
-    # Phase 4: Retroactive Refinement (if enabled)
-    # ------------------------------------------------------------------
-    refinement_cfg = cfg.get("refinement", {})
-    if refinement_cfg.get("enabled", False):
-        logger.info("=" * 60)
-        logger.info("Phase 4: Retroactive Refinement")
-        logger.info("=" * 60)
-
-        from project.segmentation.refinement import (
-            RetroactiveRefiner, RefinementConfig,
-        )
-
-        phase4_dir = results_dir / "phase4_refinement"
-        phase4_dir.mkdir(exist_ok=True)
-
-        refiner = RetroactiveRefiner(
-            segmenter=segmenter,
-            extractor=extractor,
-            config=RefinementConfig(**refinement_cfg),
-            extract_embeddings=extract_embeddings,
-            debug_dir=phase4_dir,
-        )
-        objects_by_image, labeled_by_image = refiner.refine(
-            objects_by_image, labeled_by_image, reader
-        )
-
-        for path, labeled in labeled_by_image.items():
-            save_visualization(path, labeled, phase4_dir, suffix="_refined")
-    else:
-        logger.info("Phase 4: Refinement skipped (disabled)")
-
-    # ------------------------------------------------------------------
-    # Phase 5: Cluster Filtering
-    # ------------------------------------------------------------------
-    logger.info("=" * 60)
-    logger.info("Phase 5: Cluster Filtering")
-    logger.info("=" * 60)
-
-    phase5_dir = results_dir / "phase5_filtered"
-    phase5_dir.mkdir(exist_ok=True)
-
-    cluster_filter = ClusterFilter(ClusterFilterConfig(**cfg["cluster_filter"]))
-    labeled_by_image = cluster_filter.filter(labeled_by_image)
-
-    if cfg["cluster_filter"].get("deduplicate_per_image", False):
-        logger.info("Per-image deduplication:")
-        labeled_by_image = cluster_filter.deduplicate_per_image(labeled_by_image)
-
-    for path, labeled in labeled_by_image.items():
-        save_visualization(path, labeled, phase5_dir, suffix="_final")
-
-    _save_predicted_masks(labeled_by_image, results_dir)
-
-    _print_summary(all_objects, labeled_by_image)
-
-
-# ======================================================================
-# PHASE 1 VARIANTS
-# ======================================================================
-
-def _extract_features(objects, extractor, image_embed=None) -> list:
-    """
-    Extract moment features (and optionally SAM2 embeddings) for each object.
-
-    Parameters
-    ----------
-    objects : list[SegmentedObject]
-        Objects to extract features from.
-    extractor : FeatureExtractor
-        Moment feature extractor.
-    image_embed : torch.Tensor, optional
-        SAM2 image encoder output (1, 256, 64, 64). If provided,
-        embeddings are extracted via masked average pooling per object.
-    """
-    valid = []
-    for obj in objects:
-        if obj.mask is None or not obj.mask.any():
-            continue
-        try:
-            obj.mask = _keep_largest_component(obj.mask)
-            obj.features = extractor.extract(obj)
-
-            if image_embed is not None:
-                obj.embedding = extract_sam2_embedding(obj, image_embed)
-
-            valid.append(obj)
-        except ValueError as e:
-            logger.warning(f"[SKIP] obj {obj.id[:8]}...: {e}")
-    return valid
-
-
-def _phase1_unsupervised(
-    image_paths, reader, segmenter, extractor, phase1_dir,
-    extract_embeddings=False,
-):
-    """Grid-based segmentation (unsupervised mode)."""
-    all_objects = []
-    objects_by_image = {}
-
-    for idx, path in enumerate(image_paths):
-        logger.info(f"[{idx+1}/{len(image_paths)}] {path.name}")
-
-        image = reader.load(str(path))
-        grid_objects = segmenter.segment(image)
-        logger.debug(f"  Grid: {len(grid_objects)} objects")
-
-        image_embed = (
-            segmenter.encode_image(image) if extract_embeddings else None
-        )
-
-        valid = _extract_features(grid_objects, extractor, image_embed)
-        if valid:
-            objects_by_image[path] = valid
-            all_objects.extend(valid)
-            save_segmentation_vis(path, valid, phase1_dir)
-        else:
-            logger.warning(f"[SKIP] {path.name}: no valid objects")
-
-    return all_objects, objects_by_image
-
-
-def _phase1_few_shot_independent(
-    image_paths, reader, segmenter, extractor, references, phase1_dir,
-    extract_embeddings=False,
-):
-    """
-    Few-shot independent: per-image (K+1)-frame video.
-    K references + 1 target per call. No grid.
-    """
-    all_objects = []
-    objects_by_image = {}
-
-    for idx, path in enumerate(image_paths):
-        logger.info(f"[{idx+1}/{len(image_paths)}] {path.name}")
-
-        image = reader.load(str(path))
-
-        fs_objects = segmenter.segment_with_video_prompts(
-            target_image=image,
-            references=references,
-        )
-        labels = ', '.join(o.label for o in fs_objects if o.label)
-        logger.debug(f"  Independent ({len(references)} refs): "
-                     f"{len(fs_objects)} objects ({labels})")
-
-        image_embed = (
-            segmenter.encode_image(image) if extract_embeddings else None
-        )
-
-        valid = _extract_features(fs_objects, extractor, image_embed)
-        if valid:
-            objects_by_image[path] = valid
-            all_objects.extend(valid)
-            save_segmentation_vis(path, valid, phase1_dir)
-        else:
-            logger.warning(f"[SKIP] {path.name}: no valid objects")
-
-    return all_objects, objects_by_image
-
-
-def _phase1_few_shot_iterative(
-    image_paths, reader, segmenter, extractor, references, phase1_dir,
-    extract_embeddings=False,
-):
-    """
-    Few-shot iterative: single (K+N)-frame video.
-    K references + N targets. Memory accumulates. No grid.
-    """
-    logger.info("Loading all images...")
-    images_by_path = {}
-    for path in image_paths:
-        images_by_path[path] = reader.load(str(path))
-
-    logger.info("Running iterative video predictor...")
-    target_entries = [(path, images_by_path[path]) for path in image_paths]
-    fs_by_image = segmenter.segment_batch_iterative(
-        target_entries=target_entries,
-        references=references,
-    )
-
-    logger.info("Extracting features...")
-    all_objects = []
-    objects_by_image = {}
-
-    for path in image_paths:
-        fs_objs = fs_by_image.get(path, [])
-        if fs_objs:
-            labels = ', '.join(o.label for o in fs_objs if o.label)
-            logger.debug(f"  {path.name}: {len(fs_objs)} objects ({labels})")
-        else:
-            logger.debug(f"  {path.name}: 0 objects")
-
-        image_embed = (
-            segmenter.encode_image(images_by_path[path])
-            if extract_embeddings else None
-        )
-
-        valid = _extract_features(fs_objs, extractor, image_embed)
-        if valid:
-            objects_by_image[path] = valid
-            all_objects.extend(valid)
-            save_segmentation_vis(path, valid, phase1_dir)
-        else:
-            logger.warning(f"[SKIP] {path.name}: no valid objects")
-
-    return all_objects, objects_by_image
-
-# ======================================================================
-# UTILITIES
-# ======================================================================
-
-def _keep_largest_component(mask: np.ndarray) -> np.ndarray:
-    """Keep only the largest connected component in a binary mask."""
-    from scipy.ndimage import label as cc_label
-    labeled, n = cc_label(mask)
-    if n <= 1:
-        return mask
-    sizes = np.bincount(labeled.ravel())
-    sizes[0] = 0  # ignore background
-    return labeled == sizes.argmax()
-
-
-def _save_predicted_masks(
-    labeled_by_image: dict[Path, list], results_dir: Path,
-    score_alpha: float = 0.5,
-) -> None:
-    """Save final predicted masks as binary PNGs for evaluation.
-
-    Alongside masks, write a `scores.json` per image with:
-        {filename.png: {"sam": float, "labeling": float, "combined": float}}
-
-    The `combined` score is used by evaluate.py to order predictions for
-    mAP computation. The other two are kept for potential downstream
-    analysis (e.g., recalibration studies).
-    """
-    from PIL import Image as PILImage
-
-    masks_dir = results_dir / "masks"
-    logger.info(f"Saving predicted masks -> {masks_dir}")
-
-    count = 0
-    for path, labeled in labeled_by_image.items():
-        image_dir = masks_dir / path.stem
-        image_dir.mkdir(parents=True, exist_ok=True)
-
-        # Group objects by organ name to determine if numbering is needed
-        by_name: dict[str, list] = {}
-        for obj in labeled:
-            if obj.is_noise:
-                continue
-            by_name.setdefault(obj.organ_name, []).append(obj)
-
-        scores_payload: dict[str, dict[str, float]] = {}
-
-        for name, objs in by_name.items():
-            for i, obj in enumerate(objs, start=1):
-                filename = f"{name}_{i}.png" if len(objs) > 1 else f"{name}.png"
-                # Save mask
-                mask_uint8 = (obj.segmented_object.mask * 255).astype(np.uint8)
-                PILImage.fromarray(mask_uint8, mode="L").save(image_dir / filename)
-                # Compute and record scores
-                sam = float(obj.segmented_object.confidence or 0.0)
-                lab = float(obj.labeling_confidence or 0.0)
-                combined = score_alpha * sam + (1.0 - score_alpha) * lab
-                scores_payload[filename] = {
-                    "sam": sam, "labeling": lab, "combined": combined,
-                }
-                count += 1
-
-        # One scores.json per image
-        if scores_payload:
-            with open(image_dir / "scores.json", "w") as f:
-                json.dump(scores_payload, f, indent=2)
-
-    logger.info(f"Saved {count} masks across {len(labeled_by_image)} images")
-
-
-def _print_summary(all_objects, labeled_by_image):
-    """Log a summary of segmentation, clustering, and feature statistics."""
-    logger.info("=" * 60)
-    logger.info("Summary")
-    logger.info("=" * 60)
-
-    total_labeled = sum(len(v) for v in labeled_by_image.values())
-    noise_count = sum(
-        1 for objs in labeled_by_image.values()
-        for obj in objs if obj.is_noise
-    )
-    organ_names = set(
-        obj.organ_name for objs in labeled_by_image.values()
-        for obj in objs if not obj.is_noise
-    )
-    method_counts: dict[str, int] = {}
-    for objs in labeled_by_image.values():
-        for obj in objs:
-            m = obj.method_used
-            method_counts[m] = method_counts.get(m, 0) + 1
-
-    logger.info(f"  Total segmented: {len(all_objects)}")
-    logger.info(f"  Total labeled: {total_labeled}")
-    logger.info(f"  Noise: {noise_count}")
-    logger.info(f"  Organs: {sorted(organ_names)}")
-    logger.info(f"  Images: {len(labeled_by_image)}")
-    logger.info(f"  Methods: {method_counts}")
-
-    # Moment features summary
-    features = [o.features for o in all_objects if o.features is not None]
-    if features:
-        X = np.stack(features)
-        logger.info(f"  Moment features: {X.shape}")
-        logger.debug(f"  Min: {X.min(axis=0)}")
-        logger.debug(f"  Max: {X.max(axis=0)}")
-        logger.debug(f"  Std: {X.std(axis=0)}")
-
-    # Embedding summary (separate from moments)
-    embeddings = [o.embedding for o in all_objects if o.embedding is not None]
-    if embeddings:
-        E = np.stack(embeddings)
-        logger.info(f"  Embeddings: {E.shape} "
-                    f"(mean_norm={np.linalg.norm(E, axis=1).mean():.3f})")
-    elif any(o.embedding is not None for o in all_objects):
-        n_with = sum(1 for o in all_objects if o.embedding is not None)
-        logger.info(f"  Embeddings: {n_with}/{len(all_objects)} objects have embeddings")
-
-
-# ======================================================================
-# CLI
-# ======================================================================
-
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Co-segmentation and anatomical labeling pipeline.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-    )
-
-    # Required arguments
-    parser.add_argument("--config", required=True,
-                        help="Path to experiment YAML config")
-    parser.add_argument("--dataset", required=True,
-                        help="Dataset path relative to data/raw/ "
-                             "(e.g., XRayNicoSent/images)")
-    parser.add_argument("--output-dir", required=True,
-                        help="Directory for experiment results")
-
-    # Logging
-    parser.add_argument("--verbose", action="store_true",
-                        help="Enable DEBUG-level logging")
-
-    # Optional dataset control
-    parser.add_argument("--max-images", type=int, default=None,
-                        help="Limit number of dataset images (default: use all)")
-
-    # Few-shot arguments
-    parser.add_argument("--num-refs", type=int, default=None,
-                        help="Number of few-shot references to use "
-                             "(required for few_shot mode)")
-    parser.add_argument("--ref-images", nargs="*", default=None,
-                        help="Specific reference directory names to prioritize. "
-                             "If fewer than --num-refs, remaining slots are filled "
-                             "alphabetically from available references.")
-
-    # Config overrides
-    parser.add_argument("--override", nargs="*", default=[],
-                        metavar="KEY=VALUE",
-                        help="Override config values with dot-notation. "
-                             "E.g.: --override segmenter.score_threshold=0.7 "
-                             "labeler.algorithm=hdbscan")
-
-    args = parser.parse_args()
-
-    setup_logging(verbose=args.verbose)
-
-    main(
-        config_path=args.config,
-        dataset=args.dataset,
-        output_dir=args.output_dir,
-        max_images=args.max_images,
-        num_refs=args.num_refs,
-        ref_images=args.ref_images,
-        overrides=args.override,
-    )
+    p = argparse.ArgumentParser(description="Co-segmentation pipeline.")
+    p.add_argument("--config", required=True, help="Experiment YAML config path")
+    p.add_argument("--dataset", required=True, help="Dataset path under data/raw/")
+    p.add_argument("--output-dir", required=True, help="Results directory")
+    p.add_argument("--verbose", action="store_true", help="DEBUG-level logging")
+    p.add_argument("--max-images", type=int, help="Limit dataset images")
+    p.add_argument("--num-refs", type=int, help="Few-shot reference count")
+    p.add_argument("--ref-images", nargs="*", help="Reference directory names")
+    p.add_argument("--override", nargs="*", default=[], metavar="K=V",
+                   help="Dot-notation config overrides: key.sub=value")
+    main(p.parse_args())
