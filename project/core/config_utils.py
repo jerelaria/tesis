@@ -9,8 +9,11 @@ Usage from CLI:
 """
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def apply_config_overrides(cfg: dict, overrides: list[str]) -> dict:
@@ -41,7 +44,7 @@ def apply_config_overrides(cfg: dict, overrides: list[str]) -> dict:
     if not overrides:
         return cfg
 
-    print("\n  Config overrides:")
+    logger.info("Config overrides:")
     for override in overrides:
         if "=" not in override:
             raise ValueError(
@@ -60,7 +63,7 @@ def apply_config_overrides(cfg: dict, overrides: list[str]) -> dict:
 
         parsed = _parse_value(value)
         d[parts[-1]] = parsed
-        print(f"    {key} = {parsed!r} ({type(parsed).__name__})")
+        logger.debug(f"  {key} = {parsed!r} ({type(parsed).__name__})")
 
     return cfg
 
@@ -106,7 +109,7 @@ def save_resolved_config(
     with open(out_path, "w") as f:
         json.dump(resolved, f, indent=2, default=str)
 
-    print(f"  Saved resolved config -> {out_path}")
+    logger.info(f"Saved resolved config -> {out_path}")
 
 
 def _parse_value(value: str) -> Any:

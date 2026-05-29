@@ -11,12 +11,15 @@ Provides two visualization functions:
    refinement, and filtering.
 """
 
+import logging
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import numpy as np
 from pathlib import Path
 
 from project.core.data_types import SegmentedObject
+
+logger = logging.getLogger(__name__)
 
 
 NOISE_COLOR = (0.5, 0.5, 0.5, 0.3)  # gray for noise (cluster_id == -1)
@@ -112,7 +115,7 @@ def save_segmentation_vis(
     out_path = output_dir / f"{path.stem}{suffix}.png"
     fig.savefig(out_path, bbox_inches="tight", dpi=150)
     plt.close(fig)
-    print(f"    Saved -> {out_path}")
+    logger.debug(f"Saved -> {out_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -186,4 +189,4 @@ def save_visualization(
     out_path = results_dir / f"{path.stem}{suffix}.png"
     fig.savefig(out_path, bbox_inches="tight", dpi=150)
     plt.close(fig)
-    print(f"    Saved -> {out_path}")
+    logger.debug(f"Saved -> {out_path}")

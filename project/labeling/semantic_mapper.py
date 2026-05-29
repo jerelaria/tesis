@@ -13,10 +13,13 @@ Example:
 Clusters without any labeled objects retain their numeric name ("cluster_N").
 """
 
+import logging
 from collections import Counter
 from pathlib import Path
 
 from project.core.data_types import LabeledObject
+
+logger = logging.getLogger(__name__)
 
 
 class ClusterSemanticMapper:
@@ -60,11 +63,11 @@ class ClusterSemanticMapper:
         self._cluster_to_organ = self._compute_mapping(all_labeled)
 
         if self._cluster_to_organ:
-            print("  Semantic cluster mapping (majority vote):")
+            logger.info("Semantic cluster mapping (majority vote):")
             for cid, organ in sorted(self._cluster_to_organ.items()):
-                print(f"    cluster_{cid} -> {organ}")
+                logger.debug(f"  cluster_{cid} -> {organ}")
         else:
-            print("  [WARN] No labeled objects found for semantic mapping")
+            logger.warning("No labeled objects found for semantic mapping")
 
         mapped_count = 0
         for objects in labeled_by_image.values():
@@ -73,7 +76,7 @@ class ClusterSemanticMapper:
                     obj.organ_name = self._cluster_to_organ[obj.organ_id]
                     mapped_count += 1
 
-        print(f"  Updated {mapped_count} objects with semantic names")
+        logger.info(f"Updated {mapped_count} objects with semantic names")
         return labeled_by_image
 
     def _compute_mapping(
@@ -100,8 +103,8 @@ class ClusterSemanticMapper:
             winner, count = votes.most_common(1)[0]
             total_labeled = sum(votes.values())
             ratio = count / total_labeled
-            print(f"    cluster_{cid}: '{winner}' wins with "
-                  f"{count}/{total_labeled} votes ({ratio:.0%})")
+            logger.debug(f"cluster_{cid}: '{winner}' wins with "
+                         f"{count}/{total_labeled} votes ({ratio:.0%})")
             mapping[cid] = winner
 
         return mapping

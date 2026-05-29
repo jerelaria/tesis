@@ -9,6 +9,7 @@ cluster_id -1 and confidence 0.0. No semantic organ name is assigned
 at this stage.
 """
 
+import logging
 import numpy as np
 from dataclasses import dataclass, field
 from enum import Enum
@@ -16,6 +17,8 @@ from sklearn.cluster import KMeans, DBSCAN, HDBSCAN
 from sklearn.preprocessing import StandardScaler
 from pathlib import Path
 from sklearn.neighbors import NearestNeighbors
+
+logger = logging.getLogger(__name__)
 
 from project.core.interfaces import Labeler
 from project.core.data_types import SegmentedObject, LabeledObject
@@ -217,9 +220,9 @@ class ClusteringLabeler(Labeler):
         self.config.hdbscan = resolved
         self._model = self._build_model()
 
-        print(f"  HDBSCAN adaptive resolution ({num_images} images): "
-              f"min_cluster_size={resolved.min_cluster_size}, "
-              f"min_samples={resolved.min_samples}")
+        logger.info(f"HDBSCAN adaptive resolution ({num_images} images): "
+                    f"min_cluster_size={resolved.min_cluster_size}, "
+                    f"min_samples={resolved.min_samples}")
 
     # ------------------------------------------------------------------
     # Labeler interface
@@ -255,16 +258,16 @@ class ClusteringLabeler(Labeler):
             df.insert(0, "object_id", [obj.id for obj in objects])
             csv_path = self.debug_dir / "clustering_features.csv"
             df.to_csv(csv_path, index=False)
-            print(f"  Feature matrix saved -> {csv_path}  ({df.shape})")
+            logger.debug(f"Feature matrix saved -> {csv_path}  ({df.shape})")
         # ------------------------------------------------
 
-        print(f"Clustering matrix: {X.shape} "
-              f"({len(self._feature_indices)} moments"
-              f"{f' + {X.shape[1] - len(self._feature_indices)} embedding dims' if self.config.embedding.enabled else ''})")
+        logger.info(f"Clustering matrix: {X.shape} "
+                    f"({len(self._feature_indices)} moments"
+                    f"{f' + {X.shape[1] - len(self._feature_indices)} embedding dims' if self.config.embedding.enabled else ''})")
         cluster_ids = self._model.fit_predict(X)
-        print("Unique clusters:", np.unique(cluster_ids))
-        print("Noise points:", (cluster_ids == -1).sum())
-        print("Total points:", len(cluster_ids))
+        logger.debug(f"Unique clusters: {np.unique(cluster_ids)}")
+        logger.debug(f"Noise points: {(cluster_ids == -1).sum()}")
+        logger.debug(f"Total points: {len(cluster_ids)}")
         self._id_to_cluster = {obj.id: int(cid) for obj, cid in zip(objects, cluster_ids)}
         self._is_fitted = True
 
@@ -420,8 +423,8 @@ class ClusteringLabeler(Labeler):
             from sklearn.decomposition import PCA
             n_components = min(emb_cfg.n_components, n_samples)
             if n_components < emb_cfg.n_components:
-                print(
-                    f"  [WARNING] PCA clipping n_components "
+                logger.warning(
+                    f"PCA clipping n_components "
                     f"{emb_cfg.n_components} -> {n_components} "
                     f"(only {n_samples} samples available)"
                 )

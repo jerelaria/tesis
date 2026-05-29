@@ -16,10 +16,13 @@ Key design decisions:
   which is more robust than K independent propagations + NMS.
 """
 
+import logging
 import numpy as np
 import json
 from pathlib import Path
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from project.core.data_types import LabeledObject, SegmentedObject, MedicalImage
 from project.core.interfaces import ImageReader, FeatureExtractor, Refiner
@@ -111,10 +114,10 @@ class RetroactiveRefiner(Refiner):
         )
 
         if not good_clusters:
-            print("  No good clusters found for refinement.")
+            logger.info("No good clusters found for refinement.")
             return objects_by_image, labeled_by_image
 
-        print(f"  Good clusters for refinement: {sorted(good_clusters)}")
+        logger.info(f"Good clusters for refinement: {sorted(good_clusters)}")
 
         # Build reference index once for the entire recovery pass.
         # Replaces the O(N) scan inside select_reference_masks with O(K)
@@ -123,9 +126,9 @@ class RetroactiveRefiner(Refiner):
         ref_index = build_reference_index(
             labeled_by_image, self.config.mask_selection
         )
-        print(f"  Reference index built: "
-              f"{sum(len(v) for v in ref_index._data.values())} candidates "
-              f"across {len(ref_index._data)} clusters")
+        logger.info(f"Reference index built: "
+                    f"{sum(len(v) for v in ref_index._data.values())} candidates "
+                    f"across {len(ref_index._data)} clusters")
 
         total_recovered = 0
         total_attempts = 0
@@ -138,7 +141,7 @@ class RetroactiveRefiner(Refiner):
             if not absent:
                 continue
 
-            print(f"  {path.name}: absent clusters = {sorted(absent)}")
+            logger.info(f"{path.name}: absent clusters = {sorted(absent)}")
 
             # Load image once per image (reused for all absent clusters)
             target_image = reader.load(str(path))
@@ -181,14 +184,14 @@ class RetroactiveRefiner(Refiner):
                 labeled_by_image[path].append(labeled_recovered)
 
                 total_recovered += 1
-                print(
-                    f"    Recovered cluster_{cluster_id} in {path.name} "
+                logger.info(
+                    f"Recovered cluster_{cluster_id} in {path.name} "
                     f"(confidence={recovered.confidence:.3f}, "
                     f"refs={self.config.mask_selection.num_reference_frames})"
                 )
 
-        print(
-            f"  Refinement complete: {total_recovered}/{total_attempts} "
+        logger.info(
+            f"Refinement complete: {total_recovered}/{total_attempts} "
             f"clusters recovered."
         )
 
@@ -205,7 +208,7 @@ class RetroactiveRefiner(Refiner):
             log_path = self.debug_dir / "refinement_log.json"
             with open(log_path, "w") as f:
                 json.dump(self._refinement_log, f, indent=2)
-            print(f"\n  Refinement log saved -> {log_path}")
+            logger.info(f"Refinement log saved -> {log_path}")
     
         return objects_by_image, labeled_by_image
 
@@ -234,7 +237,7 @@ class RetroactiveRefiner(Refiner):
         try:
             obj.features = self.extractor.extract(obj)
         except ValueError as e:
-            print(f"    [SKIP] Feature extraction failed: {e}")
+            logger.warning(f"[SKIP] Feature extraction failed: {e}")
             return False
 
         if image_embed is not None:
@@ -242,7 +245,7 @@ class RetroactiveRefiner(Refiner):
             try:
                 obj.embedding = extract_sam2_embedding(obj, image_embed)
             except Exception as e:
-                print(f"    [WARN] Embedding extraction failed: {e}")
+                logger.warning(f"Embedding extraction failed: {e}")
                 # Non-fatal: moment features are still available.
                 # Clustering will fail later if embeddings are required.
 
@@ -273,8 +276,8 @@ class RetroactiveRefiner(Refiner):
         alpha = self.config.improve_sam_score_weight
         threshold = self.config.improve_min_combined_score
  
-        print(f"\n  Step 2: Improving existing masks "
-              f"(threshold={threshold}, alpha={alpha})")
+        logger.info(f"Step 2: Improving existing masks "
+                    f"(threshold={threshold}, alpha={alpha})")
  
         # Snapshot: shallow copy of the per-image lists. We only need the
         # LabeledObject references (which carry the SegmentedObject with its
@@ -373,8 +376,8 @@ class RetroactiveRefiner(Refiner):
                 )
  
                 if new_score <= original_score:
-                    print(
-                        f"    {path.name}: cluster_{cluster_id} kept original "
+                    logger.debug(
+                        f"{path.name}: cluster_{cluster_id} kept original "
                         f"(original={original_score:.3f} >= new={new_score:.3f})"
                     )
                     continue
@@ -388,13 +391,13 @@ class RetroactiveRefiner(Refiner):
                 labeled_obj.method_used = "refinement_improved"
  
                 total_improved += 1
-                print(
-                    f"    {path.name}: cluster_{cluster_id} improved "
+                logger.info(
+                    f"{path.name}: cluster_{cluster_id} improved "
                     f"(score {original_score:.3f} -> {new_score:.3f})"
                 )
- 
-        print(
-            f"  Improvement complete: {total_improved}/{total_candidates} "
+
+        logger.info(
+            f"Improvement complete: {total_improved}/{total_candidates} "
             f"masks improved."
         )
 
@@ -442,7 +445,7 @@ class RetroactiveRefiner(Refiner):
             )
  
         if not references:
-            print(f"    No valid references for cluster_{cluster_id}")
+            logger.debug(f"No valid references for cluster_{cluster_id}")
             if hasattr(self, "_refinement_log"):
                 self._refinement_log.append({
                     "target": target_path.name,
@@ -481,15 +484,13 @@ class RetroactiveRefiner(Refiner):
         # the target. Used by the connected-component filter below.
         ref_centroid = self._reference_centroid(reference_entries)
  
-        # Print reference summary to stdout
-        print(f"    [REFS] cluster_{cluster_id} target={target_path.name} "
-              f"ctx={context}:")
+        logger.debug(f"[REFS] cluster_{cluster_id} target={target_path.name} ctx={context}:")
         for r in ref_records:
-            print(f"      ref_{r['index']}: {r['source']:<24}  "
-                  f"sam={r['sam_score']:.3f}  "
-                  f"conf={r['labeling_confidence']:.3f}  "
-                  f"combined={r['combined_score']:.3f}  "
-                  f"area={r['mask_area']}")
+            logger.debug(f"  ref_{r['index']}: {r['source']:<24}  "
+                         f"sam={r['sam_score']:.3f}  "
+                         f"conf={r['labeling_confidence']:.3f}  "
+                         f"combined={r['combined_score']:.3f}  "
+                         f"area={r['mask_area']}")
  
         # Load target image and propagate
         target_image = reader.load(str(target_path))
@@ -508,16 +509,16 @@ class RetroactiveRefiner(Refiner):
                 recovered.mask, ref_centroid,
             )
             if filtered_mask is None or not filtered_mask.any():
-                print(f"    [CC-FILTER] No valid component found for "
-                      f"cluster_{cluster_id} in {target_path.name}")
+                logger.debug(f"[CC-FILTER] No valid component found for "
+                             f"cluster_{cluster_id} in {target_path.name}")
                 recovered = None
             elif filtered_mask.sum() < recovered.mask.sum():
                 n_before = int(recovered.mask.sum())
                 n_after = int(filtered_mask.sum())
-                print(f"    [CC-FILTER] cluster_{cluster_id} "
-                      f"{target_path.name}: "
-                      f"area {n_before} -> {n_after} "
-                      f"({n_before - n_after} px discarded)")
+                logger.debug(f"[CC-FILTER] cluster_{cluster_id} "
+                             f"{target_path.name}: "
+                             f"area {n_before} -> {n_after} "
+                             f"({n_before - n_after} px discarded)")
                 recovered.mask = filtered_mask
  
         # Build log entry

@@ -1,5 +1,6 @@
 import sys
 import os
+import logging
 import tempfile
 import shutil
 import numpy as np
@@ -7,6 +8,8 @@ import torch
 from pathlib import Path
 from typing import List, Optional
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 from project.core.interfaces import Segmenter
 from project.core.data_types import MedicalImage, SegmentedObject
@@ -285,8 +288,8 @@ class MedSAM2Segmenter(Segmenter):
                 )
 
             total_frames = K + len(target_entries)
-            print(f"    [VIDEO BATCH] {total_frames}-frame video "
-                  f"({K} refs + {len(target_entries)} targets)")
+            logger.info(f"[VIDEO BATCH] {total_frames}-frame video "
+                        f"({K} refs + {len(target_entries)} targets)")
 
             state = video_pred.init_state(video_path=tmp_dir)
 
@@ -318,11 +321,11 @@ class MedSAM2Segmenter(Segmenter):
                 target_idx = frame_idx - K
                 n_targets = len(target_entries)
                 if target_idx % 50 == 0 or target_idx == n_targets - 1:
-                    print(f"    [VIDEO BATCH] Target {target_idx+1}/{n_targets}")
+                    logger.debug(f"[VIDEO BATCH] Target {target_idx+1}/{n_targets}")
 
             video_pred.reset_state(state)
-            print(f"    [VIDEO BATCH] {propagated_count} objects "
-                  f"across {len(target_entries)} images")
+            logger.info(f"[VIDEO BATCH] {propagated_count} objects "
+                        f"across {len(target_entries)} images")
 
         finally:
             shutil.rmtree(tmp_dir)
@@ -410,7 +413,7 @@ class MedSAM2Segmenter(Segmenter):
                 binary_mask = logits > 0.0
 
                 if not binary_mask.any():
-                    print(f"    [MULTI-REF] Empty mask for '{organ_name}'")
+                    logger.debug(f"[MULTI-REF] Empty mask for '{organ_name}'")
                     break
 
                 result = SegmentedObject(
@@ -471,9 +474,9 @@ class MedSAM2Segmenter(Segmenter):
                     mask=mask.astype(np.float32),
                 )
 
-        print(f"    [VIDEO] Registered {len(all_organ_names)} organs "
-              f"across {len(references)} reference frames: "
-              f"{', '.join(all_organ_names)}")
+        logger.info(f"[VIDEO] Registered {len(all_organ_names)} organs "
+                    f"across {len(references)} reference frames: "
+                    f"{', '.join(all_organ_names)}")
 
         return obj_id_to_organ
 
@@ -496,7 +499,7 @@ class MedSAM2Segmenter(Segmenter):
 
             if not binary_mask.any():
                 organ = organ_names_by_obj_id.get(obj_id, "unknown")
-                print(f"    [VIDEO] Empty mask for '{organ}', skipping")
+                logger.debug(f"[VIDEO] Empty mask for '{organ}', skipping")
                 continue
 
             confidence = self._logits_to_confidence(logits, binary_mask)
@@ -547,7 +550,7 @@ class MedSAM2Segmenter(Segmenter):
             )
         finally:
             os.chdir(original_cwd)
-        print("[MedSAM2] Video predictor loaded.")
+        logger.info("[MedSAM2] Video predictor loaded.")
         return predictor
 
     def _predict_all_points(self, points: np.ndarray) -> list:
