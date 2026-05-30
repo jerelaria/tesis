@@ -10,6 +10,7 @@ from project.core.config_utils import apply_config_overrides, save_resolved_conf
 from project.core.logging_setup import setup_logging
 from project.data_io.utils import load_image_paths
 from project.pipeline.orchestrator import build_pipeline_from_config
+from project.pipeline.segmentation_cache import resolve_segmentation
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,22 @@ def _exclude_few_shot_images(image_paths: list[Path], references: list) -> list[
     return filtered
 
 
+def _dataset_short(dataset_arg: str) -> str:
+    """Derive a short dataset identifier from the CLI dataset argument.
+
+    Strips a trailing 'images' component if present so that
+    'XRayNicoSent/images' and 'XRayNicoSent' both yield 'XRayNicoSent'.
+    """
+    p = Path(dataset_arg)
+    return p.parent.name if p.name in ("images", "imgs", "data") else p.name
+
+
 def main(args) -> None:
+    if args.no_seg_cache and args.segmentation_only:
+        raise SystemExit("--no-seg-cache and --segmentation-only are incompatible")
+    if args.no_seg_cache and args.refresh_seg:
+        raise SystemExit("--no-seg-cache and --refresh-seg are incompatible")
+
     setup_logging(verbose=args.verbose)
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
@@ -40,6 +56,10 @@ def main(args) -> None:
     logger.info(f"Mode: {mode}")
     logger.info(f"Experiment: {cfg.get('experiment', {}).get('name', 'unnamed')}")
     logger.info(f"Dataset: {args.dataset}")
+
+    propagation_mode: str | None = None
+    if mode == "few_shot":
+        propagation_mode = cfg.get("few_shot", {}).get("propagation_mode", "independent")
 
     extensions = cfg.get("dataset", {}).get("extensions", ["png"])
     image_paths = load_image_paths(args.dataset, extensions)
@@ -77,8 +97,32 @@ def main(args) -> None:
 
     results_dir = Path(args.output_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
-    pipeline = build_pipeline_from_config(cfg, results_dir, len(image_paths), references)
-    pipeline.run(image_paths, references=references)
+
+    res = resolve_segmentation(
+        cfg, image_paths, references, mode, propagation_mode,
+        args, _dataset_short(args.dataset),
+    )
+
+    pipeline = build_pipeline_from_config(
+        cfg, results_dir, len(image_paths), references,
+        need_segmenter=res.need_segmenter,
+    )
+
+    preloaded = res.compute_fn(pipeline) if res.compute_fn else res.preloaded
+
+    if args.segmentation_only:
+        save_resolved_config(
+            cfg=cfg,
+            results_dir=results_dir,
+            config_path=args.config,
+            dataset_name=args.dataset,
+            num_images=len(image_paths),
+            references_info=references_info,
+            seg_fingerprint=res.seg_fingerprint,
+        )
+        return
+
+    pipeline.run(image_paths, references=references, preloaded=preloaded)
     save_resolved_config(
         cfg=cfg,
         results_dir=results_dir,
@@ -86,6 +130,7 @@ def main(args) -> None:
         dataset_name=args.dataset,
         num_images=len(image_paths),
         references_info=references_info,
+        seg_fingerprint=res.seg_fingerprint,
     )
 
 
@@ -100,4 +145,41 @@ if __name__ == "__main__":
     p.add_argument("--ref-images", nargs="*", help="Reference directory names")
     p.add_argument("--override", nargs="*", default=[], metavar="K=V",
                    help="Dot-notation config overrides: key.sub=value")
+    p.add_argument(
+        "--segmentation-only",
+        action="store_true",
+        help=(
+            "Compute Phase 1, write the shared segmentation cache, then exit. "
+            "Sanctioned way to pre-compute segmentation. Idempotent on cache hit "
+            "(no-op unless --refresh-seg)."
+        ),
+    )
+    p.add_argument(
+        "--compute-seg-if-missing",
+        action="store_true",
+        help=(
+            "On a normal run, if the segmentation cache is missing, compute and "
+            "cache Phase 1 inline then continue. Without this flag a cache miss "
+            "is a hard error."
+        ),
+    )
+    p.add_argument(
+        "--refresh-seg",
+        action="store_true",
+        help="Recompute Phase 1 even on a cache hit; overwrites the existing cache.",
+    )
+    p.add_argument(
+        "--seg-cache-dir",
+        default="results/_segmentation",
+        metavar="PATH",
+        help="Root directory for shared segmentation caches (default: results/_segmentation).",
+    )
+    p.add_argument(
+        "--no-seg-cache",
+        action="store_true",
+        help=(
+            "Bypass the segmentation cache entirely: compute Phase 1 in memory "
+            "without reading or writing any cache. Escape hatch for debugging."
+        ),
+    )
     main(p.parse_args())

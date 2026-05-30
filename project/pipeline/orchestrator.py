@@ -25,7 +25,7 @@ class Pipeline:
         self,
         mode: str,
         reader: MedicalImageReader,
-        segmenter: MedSAM2Segmenter,
+        segmenter: MedSAM2Segmenter | None,
         extractor: MomentFeatureExtractor,
         labeler: ClusteringLabeler | None,
         refiner,
@@ -45,8 +45,20 @@ class Pipeline:
         self.extract_embeddings = extract_embeddings
         self.propagation_mode = propagation_mode
 
-    def run(self, image_paths, references=None) -> dict[Path, list[LabeledObject]]:
-        all_objects, objects_by_image = self.phase1(image_paths, references)
+    def run(
+        self,
+        image_paths,
+        references=None,
+        preloaded: tuple | None = None,
+    ) -> dict[Path, list[LabeledObject]]:
+        if preloaded is not None:
+            all_objects, objects_by_image = preloaded
+            logger.info(
+                f"Phase 1 skipped: using {len(all_objects)} cached objects "
+                f"from {len(objects_by_image)} images"
+            )
+        else:
+            all_objects, objects_by_image = self.phase1(image_paths, references)
         logger.info(f"Total objects: {len(all_objects)}")
 
         if self.labeler is None:
@@ -71,27 +83,35 @@ class Pipeline:
     # Phases
     # ------------------------------------------------------------------
 
-    def phase1(self, image_paths, references):
+    def phase1(self, image_paths, references, force_embeddings: bool = False):
         logger.info("=" * 60)
         logger.info("Phase 1: Segmentation + Feature Extraction")
         logger.info("=" * 60)
 
+        if self.segmenter is None:
+            raise RuntimeError(
+                "Segmenter not available for Phase 1. "
+                "Pass need_segmenter=True to build_pipeline_from_config."
+            )
+
         phase1_dir = self.results_dir / "phase1_segmentation"
         phase1_dir.mkdir(exist_ok=True)
+
+        extract_embeddings = self.extract_embeddings or force_embeddings
 
         if self.mode == "unsupervised":
             return run_phase1_unsupervised(
                 image_paths, self.reader, self.segmenter, self.extractor,
-                phase1_dir, extract_embeddings=self.extract_embeddings,
+                phase1_dir, extract_embeddings=extract_embeddings,
             )
         if self.propagation_mode == "independent":
             return run_phase1_few_shot_independent(
                 image_paths, self.reader, self.segmenter, self.extractor,
-                references, phase1_dir, extract_embeddings=self.extract_embeddings,
+                references, phase1_dir, extract_embeddings=extract_embeddings,
             )
         return run_phase1_few_shot_iterative(
             image_paths, self.reader, self.segmenter, self.extractor,
-            references, phase1_dir, extract_embeddings=self.extract_embeddings,
+            references, phase1_dir, extract_embeddings=extract_embeddings,
         )
 
     def phase2(self, all_objects, objects_by_image):
@@ -224,16 +244,25 @@ def build_pipeline_from_config(
     results_dir: Path,
     num_images: int,
     references: list | None,
+    need_segmenter: bool = True,
 ) -> Pipeline:
-    """Construct a Pipeline from a resolved YAML config dict."""
+    """Construct a Pipeline from a resolved YAML config dict.
+
+    Set need_segmenter=False when Phase 1 output is loaded from cache and
+    refinement is disabled; this skips the expensive GPU model load.
+    """
     mode = cfg.get("mode", "unsupervised")
 
     reader = MedicalImageReader()
     extractor = MomentFeatureExtractor()
 
-    seg_cfg = dict(cfg["segmenter"])
-    seg_cfg.pop("model", None)
-    segmenter = MedSAM2Segmenter(MedSAM2Config(**seg_cfg))
+    if need_segmenter:
+        seg_cfg = dict(cfg["segmenter"])
+        seg_cfg.pop("model", None)
+        segmenter: MedSAM2Segmenter | None = MedSAM2Segmenter(MedSAM2Config(**seg_cfg))
+    else:
+        segmenter = None
+        logger.info("Segmenter not loaded (using cached segmentation)")
 
     # Clustering can be disabled to benchmark raw MedSAM2 output as a
     # minimal-pipeline baseline.

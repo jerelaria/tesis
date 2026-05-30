@@ -75,6 +75,7 @@ def save_resolved_config(
     dataset_name: str,
     num_images: int,
     references_info: dict | None = None,
+    seg_fingerprint: str | None = None,
 ) -> None:
     """
     Save the fully resolved config (with overrides, resolved HDBSCAN params,
@@ -94,6 +95,8 @@ def save_resolved_config(
         Number of images actually processed (after exclusions).
     references_info : dict | None
         Optional dict with few-shot reference details.
+    seg_fingerprint : str | None
+        Cache directory name (prefixed hash) of the Phase 1 segmentation used.
     """
     resolved = {
         "original_config": str(config_path),
@@ -104,6 +107,9 @@ def save_resolved_config(
 
     if references_info:
         resolved["few_shot_resolved"] = references_info
+
+    if seg_fingerprint is not None:
+        resolved["seg_fingerprint"] = seg_fingerprint
 
     out_path = results_dir / "resolved_config.json"
     with open(out_path, "w") as f:

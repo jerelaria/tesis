@@ -431,7 +431,12 @@ class RetroactiveRefiner(Refiner):
         for i, ref_obj in enumerate(references):
             ref_source = ref_obj.segmented_object.source_image
             ref_mask = ref_obj.segmented_object.mask
-            reference_entries.append((ref_source.volume, ref_mask))
+            # volume is None when source_image was reconstructed from cache;
+            # reload from disk via source_path in that case.
+            vol = ref_source.volume
+            if vol is None:
+                vol = reader.load(str(ref_source.source_path)).volume
+            reference_entries.append((vol, ref_mask))
 
             sam = float(ref_obj.segmented_object.confidence or 0.0)
             conf = float(ref_obj.labeling_confidence)
