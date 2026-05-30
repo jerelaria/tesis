@@ -1,0 +1,161 @@
+"""
+runner.py
+---------
+Main evaluation orchestrator and CLI entry point.
+
+Coordinates mask loading, matching, coverage/cleanliness counting, mAP
+computation, aggregation, and result saving across all image directories.
+"""
+
+import argparse
+from pathlib import Path
+
+from project.evaluation.aggregation import aggregate_quality
+from project.evaluation.coverage import compute_pr_counts, aggregate_pr
+from project.evaluation.io import (
+    load_masks_from_dir,
+    load_scores_from_dir,
+    save_results,
+    print_summary,
+)
+from project.evaluation.map import compute_map
+from project.evaluation.matching import match_semantic, match_hungarian
+
+
+def evaluate(
+    gt_dir: Path,
+    pred_dir: Path,
+    matching: str,
+    iou_thresholds: list[float],
+    compute_map_metric: bool = True,
+) -> tuple[list[dict], dict]:
+    """
+    Run evaluation across all images.
+
+    Quality metrics use the chosen matching strategy.
+    Coverage / cleanliness metrics are matching-agnostic.
+    mAP@[0.5:0.95] is matching-agnostic and pools predictions across images.
+    """
+    match_fn = match_semantic if matching == "semantic" else match_hungarian
+
+    gt_stems = {d.name for d in gt_dir.iterdir() if d.is_dir()}
+    pred_stems = {d.name for d in pred_dir.iterdir() if d.is_dir()}
+
+    common = sorted(gt_stems & pred_stems)
+    gt_only = sorted(gt_stems - pred_stems)
+    pred_only = sorted(pred_stems - gt_stems)
+
+    if gt_only:
+        print(f"  Warning: {len(gt_only)} images in GT but not in predictions")
+    if pred_only:
+        print(f"  Warning: {len(pred_only)} images in predictions but not in GT")
+
+    print(f"  Evaluating {len(common)} images (matching={matching})")
+    print(f"  IoU thresholds for P/R/F1: {iou_thresholds}")
+
+    all_results: list[dict] = []
+    pr_counts_by_thr: dict[float, list[dict]] = {thr: [] for thr in iou_thresholds}
+
+    pred_masks_all: list[dict] = []
+    gt_masks_all: list[dict] = []
+    pred_scores_all: list[dict] = []
+
+    for stem in common:
+        gt_masks = load_masks_from_dir(gt_dir / stem)
+        pred_masks = load_masks_from_dir(pred_dir / stem)
+        pred_scores = load_scores_from_dir(pred_dir / stem)
+
+        if not gt_masks:
+            continue
+
+        image_results = match_fn(pred_masks, gt_masks)
+        for r in image_results:
+            r["image"] = stem
+        all_results.extend(image_results)
+
+        for thr in iou_thresholds:
+            pr_counts_by_thr[thr].append(
+                compute_pr_counts(pred_masks, gt_masks, thr)
+            )
+
+        pred_masks_all.append(pred_masks)
+        gt_masks_all.append(gt_masks)
+        pred_scores_all.append({
+            name: pred_scores.get(name, 1.0) for name in pred_masks
+        })
+
+    # Report whether real scores or fallback were used (helps interpret mAP)
+    n_pred = sum(len(s) for s in pred_scores_all)
+    n_with_score = sum(
+        1 for image_scores in pred_scores_all
+        for v in image_scores.values()
+        if v != 1.0
+    )
+    if n_pred > 0:
+        pct = 100 * n_with_score / n_pred
+        print(f"  mAP scoring: {n_with_score}/{n_pred} predictions ({pct:.0f}%) "
+              f"have real scores; rest use fallback=1.0")
+
+    quality_summary = aggregate_quality(all_results)
+    pr_per_organ, pr_global = aggregate_pr(pr_counts_by_thr, iou_thresholds)
+
+    n_images = len({r["image"] for r in all_results if "image" in r})
+    summary: dict = {
+        "per_organ": {},
+        "global": {**quality_summary["global"], **pr_global},
+        "n_images": n_images,
+        "n_entries": len(all_results),
+        "iou_thresholds": iou_thresholds,
+        "matching": matching,
+    }
+
+    if compute_map_metric:
+        map_result = compute_map(pred_masks_all, gt_masks_all, pred_scores_all)
+        summary["global"]["map"] = map_result["map"]
+        summary["global"]["map_50"] = map_result["map_50"]
+        summary["global"]["map_75"] = map_result["map_75"]
+        summary["map_per_threshold"] = map_result["ap_per_threshold"]
+
+    organs = set(quality_summary["per_organ"].keys()) | set(pr_per_organ.keys())
+    for organ in organs:
+        merged: dict = {}
+        merged.update(quality_summary["per_organ"].get(organ, {}))
+        merged.update(pr_per_organ.get(organ, {}))
+        summary["per_organ"][organ] = merged
+
+    return all_results, summary
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Evaluate predicted masks against ground truth.",
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter,
+    )
+    parser.add_argument("--gt", required=True,
+                        help="GT masks directory (with per-image subfolders)")
+    parser.add_argument("--pred", required=True,
+                        help="Predicted masks directory (same structure)")
+    parser.add_argument("--output", required=True,
+                        help="Directory to save metrics.csv and summary.json")
+    parser.add_argument("--matching", default="hungarian",
+                        choices=["semantic", "hungarian"],
+                        help="Matching strategy for quality metrics")
+    parser.add_argument("--iou-thresholds", nargs="+", type=float,
+                        default=[0.5, 0.7],
+                        help="IoU thresholds at which to report P/R/F1")
+    args = parser.parse_args()
+
+    gt_dir = Path(args.gt)
+    pred_dir = Path(args.pred)
+    output_dir = Path(args.output)
+
+    if not gt_dir.is_dir():
+        raise FileNotFoundError(f"GT directory not found: {gt_dir}")
+    if not pred_dir.is_dir():
+        raise FileNotFoundError(f"Predictions directory not found: {pred_dir}")
+
+    all_results, summary = evaluate(
+        gt_dir, pred_dir, args.matching, args.iou_thresholds
+    )
+    save_results(all_results, summary, output_dir)
+    print_summary(summary)
