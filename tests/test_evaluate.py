@@ -1,7 +1,8 @@
 """Tests for evaluate.py metric and matching functions."""
 import numpy as np
 import pytest
-from evaluate import dice_score, iou_score, match_semantic, match_hungarian
+from project.evaluation.metrics_paired import dice_score, iou_score
+from project.evaluation.matching import match_semantic, match_hungarian
 
 
 # ---------------------------------------------------------------------------

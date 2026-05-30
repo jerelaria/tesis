@@ -92,11 +92,21 @@ def assd(pred: np.ndarray, gt: np.ndarray) -> float:
 
 
 def compute_quality_metrics(pred: np.ndarray, gt: np.ndarray) -> dict:
-    """Compute all quality metrics for a single (pred, gt) pair."""
+    """
+    Compute all quality metrics for a single (pred, gt) pair.
+
+    The returned dict includes ``image_diagonal``, the Euclidean length of the
+    image diagonal in pixels. Aggregation uses this as a finite worst-case
+    distance to replace ``inf`` for missing organs, so that missing organs are
+    penalised rather than excluded from the mean/std.
+    """
+    h, w = gt.shape
+    image_diagonal = float(np.sqrt(h**2 + w**2))
     return {
         "dice": dice_score(pred, gt),
         "iou": iou_score(pred, gt),
         "hausdorff": hausdorff_full(pred, gt),
         "hausdorff_95": hausdorff_95(pred, gt),
         "assd": assd(pred, gt),
+        "image_diagonal": image_diagonal,
     }
