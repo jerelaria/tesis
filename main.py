@@ -49,6 +49,10 @@ def main(args) -> None:
         raise FileNotFoundError(f"No images found for dataset '{args.dataset}'")
     logger.info(f"Found {len(image_paths)} images.")
 
+    # TODO(text_guided): Text-guided dispatch was removed in Iteration 1 to keep the
+    # CLI decoupled from the concrete segmenter. Re-introduce an `elif mode ==
+    # "text_guided":` block here once a VideoSegmenter-compatible text backend exists.
+
     references, references_info = None, None
     if mode == "few_shot":
         if args.num_refs is None:

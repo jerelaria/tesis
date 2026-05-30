@@ -26,7 +26,7 @@ from project.segmentation.medsam2.video import (
 class MedSAM2Config:
     device: str = "cuda"
     grid_side: int = 6
-    score_threshold: float = 0.80
+    score_threshold: float = 0.50
     iou_threshold: float = 0.50
 
 
