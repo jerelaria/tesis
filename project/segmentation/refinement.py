@@ -49,8 +49,8 @@ class RefinementConfig:
     min_image_frequency: float = 0.3     # clusters below this are not worth refining
     mask_selection: MaskSelectionConfig = None
     improve_existing: bool = False   # Re-segment objects below combined score threshold
-    improve_min_combined_score: float = 0.6
-    improve_sam_score_weight: float = 0.5  # alpha for combined quality score
+    improve_min_combined_score: float = 1.0
+    improve_sam_score_weight: float = 0.2  # alpha for combined quality score
 
     def __post_init__(self):
         if self.mask_selection is None:

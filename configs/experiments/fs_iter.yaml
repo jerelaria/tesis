@@ -18,10 +18,6 @@ segmenter:
   score_threshold: 0.50
   iou_threshold: 0.50
 
-extractor:
-  method: moments
-  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
-
 labeler:
   algorithm: "kmeans"
   features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]

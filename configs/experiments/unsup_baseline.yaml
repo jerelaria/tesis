@@ -21,9 +21,5 @@ segmenter:
   score_threshold: 0.70
   iou_threshold: 0.50
 
-extractor:
-  method: moments
-  features: ["V", "Cx", "Cy", "Dx", "Dy", "L"]
-
 unsupervised:
   clustering_enabled: false

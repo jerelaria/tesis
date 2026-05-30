@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 class ClusterFilterConfig:
     min_image_frequency: float = 0.3    # cluster must appear in at least this fraction of images
     min_avg_labeling_confidence: float = 0.5   # minimum average clustering confidence
-    min_avg_sam_confidence: float = 0.75       # minimum average SAM segmentation score
+    min_avg_sam_confidence: float = 0.60       # minimum average SAM segmentation score
     deduplicate_per_image: bool = False
     dedup_sam_score_weight: float = 0.5  # alpha for combined score: alpha * sam + (1-alpha) * cluster_conf
 

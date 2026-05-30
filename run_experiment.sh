@@ -39,8 +39,9 @@ set -e
 #
 # ============================================================================
 
-source /media/apoloml/DATOS_2/Tesis_Cosegmentacion/venv/bin/activate
-export LD_LIBRARY_PATH=/media/apoloml/DATOS_2/Tesis_Cosegmentacion/venv/lib/python3.13/site-packages/nvidia/cu13/lib:$LD_LIBRARY_PATH
+PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+source "${PROJECT_ROOT}/venv/bin/activate"
+export LD_LIBRARY_PATH="${PROJECT_ROOT}/venv/lib/python3.13/site-packages/nvidia/cu13/lib:${LD_LIBRARY_PATH}"
 
 # ── Parse version + init ─────────────────────────────────────────────────────
 
