@@ -138,3 +138,80 @@ def make_point_grid(h: int, w: int, grid_side: int = 6) -> np.ndarray:
     xs = np.linspace(w * 0.02, w * 0.98, grid_side).astype(int)
     ys = np.linspace(h * 0.02, h * 0.98, grid_side).astype(int)
     return np.array([(x, y) for y in ys for x in xs])
+
+
+# ---------------------------------------------------------------------------
+# Connected-component filtering (used by refinement)
+# ---------------------------------------------------------------------------
+
+def reference_centroid(
+    reference_entries: list[tuple[np.ndarray, np.ndarray]],
+) -> tuple[float, float]:
+    """Compute mean (row, col) centroid across all reference masks.
+
+    Returns (0.0, 0.0) if all masks are empty (degenerate case).
+    """
+    rows, cols = [], []
+    for _, mask in reference_entries:
+        if mask.any():
+            ys, xs = np.where(mask)
+            rows.append(float(ys.mean()))
+            cols.append(float(xs.mean()))
+    if not rows:
+        return (0.0, 0.0)
+    return (float(np.mean(rows)), float(np.mean(cols)))
+
+
+def select_closest_component(
+    mask: np.ndarray,
+    ref_centroid: tuple[float, float],
+    min_component_area: int = 50,
+) -> np.ndarray | None:
+    """Keep the connected component whose centroid is closest to ref_centroid.
+
+    Components smaller than min_component_area pixels are treated as noise
+    and never selected regardless of centroid distance.
+
+    Parameters
+    ----------
+    mask : np.ndarray
+        Binary mask (H, W) as returned by SAM2.
+    ref_centroid : tuple[float, float]
+        (row, col) mean centroid of the K reference masks.
+    min_component_area : int
+        Minimum pixel area for a component to be a candidate.
+
+    Returns
+    -------
+    np.ndarray or None
+        Binary mask containing only the selected component,
+        or None if no component passes the area threshold.
+    """
+    from scipy.ndimage import label as cc_label
+
+    labeled_arr, n_components = cc_label(mask)
+    if n_components == 0:
+        return None
+    if n_components == 1:
+        return mask
+
+    ref_row, ref_col = ref_centroid
+    best_label = None
+    best_dist = float("inf")
+
+    for comp_id in range(1, n_components + 1):
+        comp_mask = labeled_arr == comp_id
+        area = int(comp_mask.sum())
+        if area < min_component_area:
+            continue
+        ys, xs = np.where(comp_mask)
+        cy, cx = float(ys.mean()), float(xs.mean())
+        dist = ((cy - ref_row) ** 2 + (cx - ref_col) ** 2) ** 0.5
+        if dist < best_dist:
+            best_dist = dist
+            best_label = comp_id
+
+    if best_label is None:
+        return None
+
+    return labeled_arr == best_label

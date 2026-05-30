@@ -1,9 +1,32 @@
+from __future__ import annotations
+
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Optional, Protocol
 import numpy as np
 
 from project.core.data_types import MedicalImage, SegmentedObject, LabeledObject
+
+if TYPE_CHECKING:
+    import torch
+
+
+class VideoSegmenter(Protocol):
+    """Protocol for segmenters that support multi-reference video propagation.
+
+    Decouples RetroactiveRefiner from the concrete MedSAM2Segmenter so that
+    alternative implementations (e.g., stubs in tests) satisfy the interface
+    without inheriting from a GPU-heavy class.
+    """
+
+    def segment_with_multi_reference(
+        self,
+        target_image: MedicalImage,
+        reference_entries: list[tuple[np.ndarray, np.ndarray]],
+        organ_name: str,
+    ) -> SegmentedObject | None: ...
+
+    def encode_image(self, image: MedicalImage) -> torch.Tensor: ...
 
 
 class ImageReader(ABC):
