@@ -23,6 +23,7 @@ def parse_organ_name(stem: str) -> str:
 def match_semantic(
     pred_masks: dict[str, np.ndarray],
     gt_masks: dict[str, np.ndarray],
+    match_threshold: float = 0.5,
 ) -> list[dict]:
     """
     Match predictions to GT by organ name.
@@ -30,7 +31,12 @@ def match_semantic(
     Groups masks by base organ name (e.g., 'lung'), then within each organ
     uses Hungarian matching on IoU to pair instances (lung_1 <-> lung_1).
 
-    GT organs with no prediction get dice=0, iou=0, hd95=inf.
+    A matched pair whose IoU < match_threshold is demoted to missing:
+    the GT entry gets pred_name=None and quality computed against an empty
+    mask. The prediction that falls below threshold simply goes unused here;
+    its false-positive status is captured by the coverage/cleanliness family.
+
+    GT organs with no prediction at all get dice=0, iou=0, hd95=inf.
     """
     gt_by_organ: dict[str, list[tuple[str, np.ndarray]]] = {}
     for name, mask in gt_masks.items():
@@ -65,10 +71,19 @@ def match_semantic(
         for i, j in zip(row_ind, col_ind):
             gt_name, gt_mask = gt_list[i]
             pred_name, pred_mask = pred_list[j]
-            results.append({
-                "gt_name": gt_name, "pred_name": pred_name, "organ": organ,
-                **compute_quality_metrics(pred_mask, gt_mask),
-            })
+            pair_iou = -cost_matrix[i, j]
+
+            if pair_iou >= match_threshold:
+                results.append({
+                    "gt_name": gt_name, "pred_name": pred_name, "organ": organ,
+                    **compute_quality_metrics(pred_mask, gt_mask),
+                })
+            else:
+                h, w = gt_mask.shape
+                results.append({
+                    "gt_name": gt_name, "pred_name": None, "organ": organ,
+                    **compute_quality_metrics(np.zeros((h, w), dtype=bool), gt_mask),
+                })
             matched_gt.add(i)
 
         for i, (gt_name, gt_mask) in enumerate(gt_list):
@@ -85,6 +100,7 @@ def match_semantic(
 def match_hungarian(
     pred_masks: dict[str, np.ndarray],
     gt_masks: dict[str, np.ndarray],
+    match_threshold: float = 0.5,
 ) -> list[dict]:
     """
     Match predictions to GT using global Hungarian assignment on IoU.
@@ -92,8 +108,8 @@ def match_hungarian(
     Used for unsupervised mode where prediction names (e.g., obj_NNN) carry
     no semantic meaning. Finds the best global GT-to-pred assignment.
 
-    GT organs with no positive-IoU match (or no prediction at all) get
-    dice=0, iou=0, hd95=inf.
+    GT organs whose best-matched prediction has IoU < match_threshold are
+    treated as missing: pred_name=None, quality computed against an empty mask.
     """
     gt_list = list(gt_masks.items())
     pred_list = list(pred_masks.items())
@@ -122,7 +138,7 @@ def match_hungarian(
         pred_name, pred_mask = pred_list[j]
         organ = parse_organ_name(gt_name)
 
-        if -cost_matrix[i, j] > 0:
+        if -cost_matrix[i, j] >= match_threshold:
             results.append({
                 "gt_name": gt_name, "pred_name": pred_name, "organ": organ,
                 **compute_quality_metrics(pred_mask, gt_mask),

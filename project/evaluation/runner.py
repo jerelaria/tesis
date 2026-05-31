@@ -21,6 +21,10 @@ from project.evaluation.io import (
 from project.evaluation.map import compute_map
 from project.evaluation.matching import match_semantic, match_hungarian
 
+# 1.0 is excluded from the fine IoU grid: at threshold=1.0 only pixel-perfect
+# predictions are TP, which is degenerate for real-world masks.
+_DEFAULT_IOU_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+
 
 def evaluate(
     gt_dir: Path,
@@ -28,13 +32,23 @@ def evaluate(
     matching: str,
     iou_thresholds: list[float],
     compute_map_metric: bool = True,
+    match_threshold: float = 0.5,
 ) -> tuple[list[dict], dict]:
     """
     Run evaluation across all images.
 
-    Quality metrics use the chosen matching strategy.
+    Quality metrics use the chosen matching strategy with match_threshold as
+    the IoU gate: paired predictions with IoU < match_threshold are demoted to
+    missing (pred_name=None, quality against an empty mask).
     Coverage / cleanliness metrics are matching-agnostic.
     mAP@[0.5:0.95] is matching-agnostic and pools predictions across images.
+
+    Parameters
+    ----------
+    match_threshold : float
+        Minimum IoU for a matched pair to count as a detection in quality
+        metrics. Below this threshold the GT is treated as not detected.
+        Default 0.5.
     """
     match_fn = match_semantic if matching == "semantic" else match_hungarian
 
@@ -50,7 +64,8 @@ def evaluate(
     if pred_only:
         print(f"  Warning: {len(pred_only)} images in predictions but not in GT")
 
-    print(f"  Evaluating {len(common)} images (matching={matching})")
+    print(f"  Evaluating {len(common)} images "
+          f"(matching={matching}, match_threshold={match_threshold})")
     print(f"  IoU thresholds for P/R/F1: {iou_thresholds}")
 
     all_results: list[dict] = []
@@ -68,7 +83,7 @@ def evaluate(
         if not gt_masks:
             continue
 
-        image_results = match_fn(pred_masks, gt_masks)
+        image_results = match_fn(pred_masks, gt_masks, match_threshold)
         for r in image_results:
             r["image"] = stem
         all_results.extend(image_results)
@@ -84,7 +99,7 @@ def evaluate(
             name: pred_scores.get(name, 1.0) for name in pred_masks
         })
 
-    # Report whether real scores or fallback were used (helps interpret mAP)
+    # Compute and report the fraction of predictions with real (non-fallback) scores
     n_pred = sum(len(s) for s in pred_scores_all)
     n_with_score = sum(
         1 for image_scores in pred_scores_all
@@ -95,6 +110,8 @@ def evaluate(
         pct = 100 * n_with_score / n_pred
         print(f"  mAP scoring: {n_with_score}/{n_pred} predictions ({pct:.0f}%) "
               f"have real scores; rest use fallback=1.0")
+    else:
+        pct = 0.0
 
     quality_summary = aggregate_quality(all_results)
     pr_per_organ, pr_global = aggregate_pr(pr_counts_by_thr, iou_thresholds)
@@ -107,7 +124,11 @@ def evaluate(
         "n_entries": len(all_results),
         "iou_thresholds": iou_thresholds,
         "matching": matching,
+        "match_threshold": match_threshold,
     }
+
+    # Persist scoring coverage so plots can warn when curves are degenerate
+    summary["global"]["pct_real_scores"] = pct
 
     if compute_map_metric:
         map_result = compute_map(pred_masks_all, gt_masks_all, pred_scores_all)
@@ -115,6 +136,7 @@ def evaluate(
         summary["global"]["map_50"] = map_result["map_50"]
         summary["global"]["map_75"] = map_result["map_75"]
         summary["map_per_threshold"] = map_result["ap_per_threshold"]
+        summary["pr_curve_per_threshold"] = map_result["pr_curve_per_threshold"]
 
         # Compute P/R/F1 at each mAP grid threshold so plotting scripts can
         # draw full precision-recall curves (not just the @0.5 / @0.7 points).
@@ -159,9 +181,19 @@ def main() -> None:
     parser.add_argument("--matching", default="hungarian",
                         choices=["semantic", "hungarian"],
                         help="Matching strategy for quality metrics")
-    parser.add_argument("--iou-thresholds", nargs="+", type=float,
-                        default=[0.5, 0.7],
-                        help="IoU thresholds at which to report P/R/F1")
+    parser.add_argument(
+        "--iou-thresholds", nargs="+", type=float,
+        default=_DEFAULT_IOU_THRESHOLDS,
+        help="IoU thresholds at which to report P/R/F1 (coverage metrics). "
+             "1.0 is excluded by default: at threshold=1.0 only pixel-perfect "
+             "predictions are TP, which is degenerate for real-world masks.",
+    )
+    parser.add_argument(
+        "--match-threshold", type=float, default=0.5,
+        help="IoU gate for quality matching: pairs with IoU below this are "
+             "demoted to missing (pred_name=None, Dice=0). Does not affect "
+             "coverage/mAP metrics which are threshold-scanned independently.",
+    )
     args = parser.parse_args()
 
     gt_dir = Path(args.gt)
@@ -174,7 +206,8 @@ def main() -> None:
         raise FileNotFoundError(f"Predictions directory not found: {pred_dir}")
 
     all_results, summary = evaluate(
-        gt_dir, pred_dir, args.matching, args.iou_thresholds
+        gt_dir, pred_dir, args.matching, args.iou_thresholds,
+        match_threshold=args.match_threshold,
     )
     save_results(all_results, summary, output_dir)
     print_summary(summary)

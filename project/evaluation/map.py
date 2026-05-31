@@ -10,13 +10,18 @@ def compute_average_precision(
     matched_scores: list[float],
     n_gt: int,
     iou_threshold: float,
-) -> float:
+    return_curve: bool = False,
+) -> float | tuple[float, dict]:
     """
     Compute average precision at one IoU threshold (COCO-style).
 
     Given a list of (iou_with_matched_gt, prediction_score) pairs and the
     total number of GT instances, compute AP as the area under the
     precision-recall curve traced by varying the score threshold.
+
+    The scalar AP is computed using the Pascal VOC 2010+ monotonic precision
+    envelope. When return_curve=True the raw (pre-envelope) recall/precision
+    arrays are also returned; the area reported is still envelope-based.
 
     Parameters
     ----------
@@ -31,13 +36,20 @@ def compute_average_precision(
         denominator.
     iou_threshold : float
         Minimum IoU for a prediction to count as a true positive.
+    return_curve : bool
+        If True, return (ap, curve) where curve = {"recall": [...],
+        "precision": [...]} contains the raw curve points (before the
+        monotonic envelope) sorted by descending score.
 
     Returns
     -------
-    float
-        AP in [0, 1]. Returns 0.0 if there are no predictions or no GTs.
+    float or (float, dict)
+        AP in [0, 1], or (AP, curve_dict) when return_curve=True.
+        Returns 0.0 (and an empty curve) if there are no predictions or GTs.
     """
     if n_gt == 0 or len(matched_ious) == 0:
+        if return_curve:
+            return 0.0, {"recall": [], "precision": []}
         return 0.0
 
     order = np.argsort(-np.array(matched_scores))
@@ -59,9 +71,13 @@ def compute_average_precision(
         [[precision_envelope[0]], precision_envelope, [0.0]]
     )
 
-    return float(np.sum(
+    ap = float(np.sum(
         (recall_extended[1:] - recall_extended[:-1]) * precision_extended[1:]
     ))
+
+    if return_curve:
+        return ap, {"recall": recall.tolist(), "precision": precision.tolist()}
+    return ap
 
 
 def compute_map(
@@ -69,6 +85,7 @@ def compute_map(
     gt_masks_per_image: list[dict[str, np.ndarray]],
     pred_scores_per_image: list[dict[str, float]],
     iou_thresholds: list[float] | None = None,
+    curve_thresholds: list[float] | None = None,
 ) -> dict:
     """
     Compute mean Average Precision over a range of IoU thresholds (COCO-style).
@@ -88,6 +105,9 @@ def compute_map(
         Per image, dict mapping prediction name to its confidence score.
     iou_thresholds : list[float] or None
         Thresholds at which to compute AP. Defaults to [0.5, 0.55, ..., 0.95].
+    curve_thresholds : list[float] or None
+        IoU thresholds for which the raw PR curve is also returned.
+        Defaults to [0.5, 0.75]. Only 2 curves are stored to keep JSON small.
 
     Returns
     -------
@@ -96,9 +116,12 @@ def compute_map(
         map: mean over thresholds
         map_50: AP at IoU=0.5 (Pascal VOC criterion)
         map_75: AP at IoU=0.75 (stricter)
+        pr_curve_per_threshold: {"0.50": {"recall": [...], "precision": [...]}, ...}
     """
     if iou_thresholds is None:
         iou_thresholds = list(np.arange(0.5, 1.0, 0.05))
+    if curve_thresholds is None:
+        curve_thresholds = [0.5, 0.75]
 
     pooled_ious: list[float] = []
     pooled_scores: list[float] = []
@@ -134,12 +157,33 @@ def compute_map(
             if best_gt_idx >= 0:
                 claimed_gt.add(best_gt_idx)
 
-    ap_per_threshold = {
-        float(thr): float(
-            compute_average_precision(pooled_ious, pooled_scores, total_gt, thr)
+    # Build a set of curve thresholds that still need to be computed
+    curve_thr_remaining: set[float] = set(curve_thresholds)
+
+    ap_per_threshold: dict[float, float] = {}
+    pr_curve_per_threshold: dict[str, dict] = {}
+
+    for thr in iou_thresholds:
+        # Use approx comparison to handle floating-point representations
+        wants_curve = any(abs(thr - ct) < 1e-9 for ct in curve_thr_remaining)
+        if wants_curve:
+            ap, curve = compute_average_precision(
+                pooled_ious, pooled_scores, total_gt, thr, return_curve=True
+            )
+            for ct in list(curve_thr_remaining):
+                if abs(thr - ct) < 1e-9:
+                    pr_curve_per_threshold[f"{ct:.2f}"] = curve
+                    curve_thr_remaining.discard(ct)
+        else:
+            ap = compute_average_precision(pooled_ious, pooled_scores, total_gt, thr)
+        ap_per_threshold[float(thr)] = float(ap)
+
+    # Compute curves for thresholds not covered by iou_thresholds
+    for ct in curve_thr_remaining:
+        ap_c, curve = compute_average_precision(
+            pooled_ious, pooled_scores, total_gt, ct, return_curve=True
         )
-        for thr in iou_thresholds
-    }
+        pr_curve_per_threshold[f"{ct:.2f}"] = curve
 
     map_value = float(np.mean(list(ap_per_threshold.values())))
 
@@ -148,4 +192,5 @@ def compute_map(
         "map": map_value,
         "map_50": ap_per_threshold.get(0.5, 0.0),
         "map_75": ap_per_threshold.get(0.75, 0.0),
+        "pr_curve_per_threshold": pr_curve_per_threshold,
     }
