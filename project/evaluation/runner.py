@@ -116,6 +116,25 @@ def evaluate(
         summary["global"]["map_75"] = map_result["map_75"]
         summary["map_per_threshold"] = map_result["ap_per_threshold"]
 
+        # Compute P/R/F1 at each mAP grid threshold so plotting scripts can
+        # draw full precision-recall curves (not just the @0.5 / @0.7 points).
+        map_thrs = sorted(map_result["ap_per_threshold"].keys())
+        det_pr_by_thr: dict[float, list[dict]] = {thr: [] for thr in map_thrs}
+        for pm, gm in zip(pred_masks_all, gt_masks_all):
+            for thr in map_thrs:
+                det_pr_by_thr[thr].append(compute_pr_counts(pm, gm, thr))
+        _, det_global = aggregate_pr(det_pr_by_thr, map_thrs)
+        summary["detection_per_threshold"] = {
+            str(thr): {
+                "recall":          det_global.get(f"recall@{thr}"),
+                "precision":       det_global.get(f"precision@{thr}"),
+                "f1":              det_global.get(f"f1@{thr}"),
+                "n_gt_covered":    det_global.get(f"n_gt_covered@{thr}"),
+                "n_pred_relevant": det_global.get(f"n_pred_relevant@{thr}"),
+            }
+            for thr in map_thrs
+        }
+
     organs = set(quality_summary["per_organ"].keys()) | set(pr_per_organ.keys())
     for organ in organs:
         merged: dict = {}

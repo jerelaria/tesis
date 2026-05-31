@@ -324,7 +324,7 @@ def build_pipeline_from_config(
             debug_dir=results_dir / "phase4_refinement",
         )
 
-    cluster_filter = ClusterFilter(ClusterFilterConfig(**cfg["cluster_filter"]))
+    cluster_filter = ClusterFilter(ClusterFilterConfig(**cfg.get("cluster_filter", {})))
 
     return Pipeline(
         mode=mode,

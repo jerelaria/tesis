@@ -69,52 +69,69 @@ def save_results(
     print(f"  Saved: {json_path}")
 
 
+def _fmt_ratio(mean: float | None, std: float | None) -> str:
+    """Format a bounded metric (dice, iou) as 'mean±std' or 'N/A'."""
+    if mean is None:
+        return "N/A"
+    return f"{mean:.3f}±{std:.3f}"
+
+
+def _fmt_dist(mean: float | None, std: float | None) -> str:
+    """Format a distance metric (hausdorff etc.) as 'mean±std' or 'N/A'."""
+    if mean is None:
+        return "N/A"
+    return f"{mean:.1f}±{std:.1f}"
+
+
 def print_summary(summary: dict) -> None:
     """Print a human-readable summary to stdout."""
-    print("\n" + "=" * 75)
+    print("\n" + "=" * 80)
     print("Evaluation Summary")
-    print("=" * 75)
+    print("=" * 80)
 
     print(f"\n  Images evaluated: {summary['n_images']}")
     print(f"  Total quality entries: {summary['n_entries']}")
     print(f"  Matching: {summary.get('matching', 'unknown')}")
 
     # ----- Per-organ quality -----
-    print(f"\n  Per-organ quality:")
-    print(f"  {'Organ':<14} {'Dice':>14} {'IoU':>14} {'HD95':>14} {'Missing':>10}")
-    print("  " + "-" * 70)
+    # Two sub-rows per organ: (all) = missing penalised; (det.) = detected only
+    print(f"\n  Per-organ quality  (all = missing penalised; det. = detected only):")
+    print(f"  {'Organ':<14} {'':7} {'Dice':>14} {'IoU':>14} {'HD95':>14} {'Missing':>10}")
+    print("  " + "-" * 74)
     for organ, stats in sorted(summary["per_organ"].items()):
-        dice = (
-            f"{stats['dice_mean']:.3f}±{stats['dice_std']:.3f}"
-            if stats.get("dice_mean") is not None else "N/A"
-        )
-        iou = (
-            f"{stats['iou_mean']:.3f}±{stats['iou_std']:.3f}"
-            if stats.get("iou_mean") is not None else "N/A"
-        )
-        hd95 = (
-            f"{stats['hausdorff_95_mean']:.1f}±{stats['hausdorff_95_std']:.1f}"
-            if stats.get("hausdorff_95_mean") is not None else "N/A"
-        )
-        missing = f"{stats.get('missing', 0)}/{stats.get('count', 0)}"
-        print(f"  {organ:<14} {dice:>14} {iou:>14} {hd95:>14} {missing:>10}")
+        dice_all = _fmt_ratio(stats.get("dice_mean_with_missing"),
+                              stats.get("dice_std_with_missing"))
+        dice_det = _fmt_ratio(stats.get("dice_mean_detected_only"),
+                              stats.get("dice_std_detected_only"))
+        iou_all  = _fmt_ratio(stats.get("iou_mean_with_missing"),
+                              stats.get("iou_std_with_missing"))
+        iou_det  = _fmt_ratio(stats.get("iou_mean_detected_only"),
+                              stats.get("iou_std_detected_only"))
+        hd95_all = _fmt_dist(stats.get("hausdorff_95_mean_with_missing"),
+                             stats.get("hausdorff_95_std_with_missing"))
+        hd95_det = _fmt_dist(stats.get("hausdorff_95_mean_detected_only"),
+                             stats.get("hausdorff_95_std_detected_only"))
+        missing  = f"{stats.get('missing', 0)}/{stats.get('count', 0)}"
+        print(f"  {organ:<14} {'(all)':7} {dice_all:>14} {iou_all:>14} {hd95_all:>14} {missing:>10}")
+        print(f"  {'':14} {'(det.)':7} {dice_det:>14} {iou_det:>14} {hd95_det:>14}")
 
     # ----- Global quality -----
     g = summary["global"]
-    print("  " + "-" * 70)
-    dice = (
-        f"{g['dice_mean']:.3f}±{g['dice_std']:.3f}"
-        if g.get("dice_mean") is not None else "N/A"
-    )
-    iou = (
-        f"{g['iou_mean']:.3f}±{g['iou_std']:.3f}"
-        if g.get("iou_mean") is not None else "N/A"
-    )
-    hd95 = (
-        f"{g['hausdorff_95_mean']:.1f}±{g['hausdorff_95_std']:.1f}"
-        if g.get("hausdorff_95_mean") is not None else "N/A"
-    )
-    print(f"  {'GLOBAL':<14} {dice:>14} {iou:>14} {hd95:>14}")
+    print("  " + "-" * 74)
+    dice_all = _fmt_ratio(g.get("dice_mean_with_missing"),
+                          g.get("dice_std_with_missing"))
+    dice_det = _fmt_ratio(g.get("dice_mean_detected_only"),
+                          g.get("dice_std_detected_only"))
+    iou_all  = _fmt_ratio(g.get("iou_mean_with_missing"),
+                          g.get("iou_std_with_missing"))
+    iou_det  = _fmt_ratio(g.get("iou_mean_detected_only"),
+                          g.get("iou_std_detected_only"))
+    hd95_all = _fmt_dist(g.get("hausdorff_95_mean_with_missing"),
+                         g.get("hausdorff_95_std_with_missing"))
+    hd95_det = _fmt_dist(g.get("hausdorff_95_mean_detected_only"),
+                         g.get("hausdorff_95_std_detected_only"))
+    print(f"  {'GLOBAL':<14} {'(all)':7} {dice_all:>14} {iou_all:>14} {hd95_all:>14}")
+    print(f"  {'':14} {'(det.)':7} {dice_det:>14} {iou_det:>14} {hd95_det:>14}")
 
     # ----- Coverage / cleanliness at each threshold -----
     iou_thresholds = summary.get("iou_thresholds", [])

@@ -36,6 +36,7 @@ weights/
 
 # ── Experiment results and outputs ───────────────────────
 results/
+results_tests/
 archive/
 configs/datasets/synthetic_curves/
 
