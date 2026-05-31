@@ -166,6 +166,7 @@ def select_closest_component(
     mask: np.ndarray,
     ref_centroid: tuple[float, float],
     min_component_area: int = 50,
+    max_centroid_distance: float | None = None,
 ) -> np.ndarray | None:
     """Keep the connected component whose centroid is closest to ref_centroid.
 
@@ -180,12 +181,16 @@ def select_closest_component(
         (row, col) mean centroid of the K reference masks.
     min_component_area : int
         Minimum pixel area for a component to be a candidate.
+    max_centroid_distance : float or None
+        If set, reject the best candidate when its centroid distance to
+        ref_centroid exceeds this value (implausibly far from references).
+        None disables the gate (backward-compatible default).
 
     Returns
     -------
     np.ndarray or None
         Binary mask containing only the selected component,
-        or None if no component passes the area threshold.
+        or None if no component passes the area or distance thresholds.
     """
     from scipy.ndimage import label as cc_label
 
@@ -193,6 +198,14 @@ def select_closest_component(
     if n_components == 0:
         return None
     if n_components == 1:
+        if max_centroid_distance is not None:
+            ys, xs = np.where(mask)
+            if ys.size > 0:
+                cy, cx = float(ys.mean()), float(xs.mean())
+                ref_row, ref_col = ref_centroid
+                dist = ((cy - ref_row) ** 2 + (cx - ref_col) ** 2) ** 0.5
+                if dist > max_centroid_distance:
+                    return None
         return mask
 
     ref_row, ref_col = ref_centroid
@@ -213,5 +226,8 @@ def select_closest_component(
 
     if best_label is None:
         return None
+
+    if max_centroid_distance is not None and best_dist > max_centroid_distance:
+        return None  # closest valid component is implausibly far -> reject
 
     return labeled_arr == best_label

@@ -320,6 +320,7 @@ def build_pipeline_from_config(
             segmenter=segmenter,
             extractor=extractor,
             config=RefinementConfig(**refinement_cfg),
+            labeler=labeler,
             extract_embeddings=extract_embeddings,
             debug_dir=results_dir / "phase4_refinement",
         )

@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 from project.core.data_types import LabeledObject, SegmentedObject, MedicalImage
 from project.core.interfaces import (
-    ImageReader, FeatureExtractor, Refiner, VideoSegmenter,
+    ImageReader, FeatureExtractor, Labeler, Refiner, VideoSegmenter,
 )
 from project.segmentation.quality import (
     MaskSelectionConfig,
@@ -38,7 +38,7 @@ from project.segmentation.quality import (
     build_reference_index,
     select_from_index,
 )
-from project.segmentation.utils import reference_centroid, select_closest_component
+from project.segmentation.utils import mask_iou, reference_centroid, select_closest_component
 
 
 @dataclass
@@ -51,6 +51,13 @@ class RefinementConfig:
     improve_existing: bool = False   # Re-segment objects below combined score threshold
     improve_min_combined_score: float = 1.0
     improve_sam_score_weight: float = 0.2  # alpha for combined quality score
+    # Structural guards for _improve_existing_masks (Fix 1).
+    # Set improve_min_area_ratio=0.0, improve_min_iou_with_original=0.0,
+    # max_centroid_distance_factor=None to reproduce pre-fix behaviour (ablation).
+    improve_min_area_ratio: float = 0.5          # reject if new_area/old_area < this (collapse guard)
+    improve_max_area_ratio: float | None = None  # reject if ratio > this (merge guard); None = off
+    improve_min_iou_with_original: float = 0.5   # reject if IoU(new, old) < this (teleport guard)
+    max_centroid_distance_factor: float | None = 2.5  # CC distance gate scale; None = off
 
     def __post_init__(self):
         if self.mask_selection is None:
@@ -139,12 +146,14 @@ class RetroactiveRefiner(Refiner):
         segmenter: VideoSegmenter,
         extractor: FeatureExtractor,
         config: RefinementConfig,
+        labeler: Labeler | None = None,
         extract_embeddings: bool = False,
         debug_dir: Path | None = None,
     ):
         self.segmenter = segmenter
         self.extractor = extractor
         self.config = config
+        self.labeler = labeler
         self.extract_embeddings = extract_embeddings
         self.debug_dir = debug_dir
         self._refinement_log = None  # Opened as a JSONL file handle in refine()
@@ -347,11 +356,58 @@ class RetroactiveRefiner(Refiner):
             if not self._extract_obj_features(new_obj, image_embed):
                 continue
 
+            old_mask = labeled_obj.segmented_object.mask
+            new_mask = new_obj.mask
+
+            # --- Fix 1: structural guards (reject collapse / teleport / merge) ---
+            old_area = int(old_mask.sum())
+            new_area = int(new_mask.sum())
+            area_ratio = new_area / max(old_area, 1)
+            iou = mask_iou(new_mask, old_mask)
+
+            if area_ratio < self.config.improve_min_area_ratio:
+                logger.debug(
+                    f"{path.name}: cluster_{cluster_id} rejected "
+                    f"(area_ratio={area_ratio:.3f} < {self.config.improve_min_area_ratio})"
+                )
+                continue
+            if (
+                self.config.improve_max_area_ratio is not None
+                and area_ratio > self.config.improve_max_area_ratio
+            ):
+                logger.debug(
+                    f"{path.name}: cluster_{cluster_id} rejected "
+                    f"(area_ratio={area_ratio:.3f} > {self.config.improve_max_area_ratio})"
+                )
+                continue
+            if iou < self.config.improve_min_iou_with_original:
+                logger.debug(
+                    f"{path.name}: cluster_{cluster_id} rejected "
+                    f"(iou={iou:.3f} < {self.config.improve_min_iou_with_original})"
+                )
+                continue
+
+            # --- Fix 2: recompute labeling confidence honestly ---
+            if self.labeler is not None and hasattr(self.labeler, "predict_new"):
+                relabeled = self.labeler.predict_new([new_obj])[0]
+                if relabeled.organ_id != cluster_id:
+                    logger.debug(
+                        f"{path.name}: cluster_{cluster_id} rejected "
+                        f"(relabeled to cluster_{relabeled.organ_id})"
+                    )
+                    continue
+                new_conf = relabeled.labeling_confidence
+                if new_conf < self.config.min_cluster_confidence:
+                    logger.debug(
+                        f"{path.name}: cluster_{cluster_id} rejected "
+                        f"(new_conf={new_conf:.3f} < {self.config.min_cluster_confidence})"
+                    )
+                    continue
+            else:
+                new_conf = labeled_obj.labeling_confidence  # fallback (tests / no labeler)
+
             new_sam_score = new_obj.confidence or 0.0
-            new_score = (
-                alpha * new_sam_score
-                + (1.0 - alpha) * labeled_obj.labeling_confidence
-            )
+            new_score = alpha * new_sam_score + (1.0 - alpha) * new_conf
 
             if new_score <= original_score:
                 logger.debug(
@@ -360,12 +416,13 @@ class RetroactiveRefiner(Refiner):
                 )
                 continue
 
-            # Replace mask in-place (snapshot is unaffected).
+            # Accept replacement (snapshot is unaffected).
             old_seg = labeled_obj.segmented_object
             old_seg.mask = new_obj.mask
             old_seg.confidence = new_obj.confidence
             old_seg.features = new_obj.features
             old_seg.embedding = new_obj.embedding
+            labeled_obj.labeling_confidence = new_conf  # keep consistent with new mask
             labeled_obj.method_used = "refinement_improved"
 
             total_improved += 1
@@ -476,7 +533,18 @@ class RetroactiveRefiner(Refiner):
         )
 
         if recovered is not None:
-            filtered_mask = select_closest_component(recovered.mask, ref_cent)
+            max_dist = None
+            if self.config.max_centroid_distance_factor:
+                ref_areas = [int(m.sum()) for _, m in reference_entries if m.any()]
+                if ref_areas:
+                    mean_radius = float(
+                        np.mean([(a / np.pi) ** 0.5 for a in ref_areas])
+                    )
+                    max_dist = self.config.max_centroid_distance_factor * mean_radius
+
+            filtered_mask = select_closest_component(
+                recovered.mask, ref_cent, max_centroid_distance=max_dist
+            )
             if filtered_mask is None or not filtered_mask.any():
                 logger.debug(
                     f"[CC-FILTER] No valid component for "
