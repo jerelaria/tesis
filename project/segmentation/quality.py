@@ -1,260 +1,193 @@
 """
-Quality scoring and reference mask selection for retroactive refinement.
+Cluster quality scoring and prototype selection for batch propagation.
 
-This module provides functions to:
-1. Determine which clusters are absent from an image (candidates for refinement).
-2. Select the best reference masks from other images to use as context frames
-   for the SAM2 video predictor.
+This module provides:
+1. ClusterQualityConfig / identify_good_clusters — three-threshold criterion
+   to decide which clusters represent real organs.
+2. MaskSelectionConfig / select_prototypes — select the top-K prototype masks
+   per good cluster, ranked by combined score.
 
-A cluster C is considered absent from image I if no object in I was assigned
-to C with labeling_confidence >= min_cluster_confidence. This uses clustering
-confidence (certainty of cluster membership), not SAM score, because a high
-SAM score does not guarantee correct cluster assignment.
-
-Reference masks are selected using a combined score:
-    combined_score = alpha * sam_score + (1 - alpha) * cluster_confidence
-Only candidates above min_combined_score are kept, truncated to num_reference_frames.
+Combined score formula:
+    combined_score = alpha * sam_score + (1 - alpha) * labeling_confidence
+where alpha = MaskSelectionConfig.sam_score_weight.
 """
 
-import numpy as np
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
 
 from project.core.data_types import LabeledObject
 
 
 @dataclass
 class MaskSelectionConfig:
-    """Configuration for reference mask selection in retroactive refinement."""
-    sam_score_weight: float = 0.5           # alpha: weight for SAM confidence
-    min_combined_score: float = 0.75        # minimum combined score to be a candidate
-    num_reference_frames: int = 5           # max number of reference frames for the video
+    """Configuration for prototype selection and reference mask scoring."""
+    sam_score_weight: float = 0.5     # alpha: weight for SAM confidence
+    min_combined_score: float = 0.75  # minimum score to qualify as a prototype
+    num_reference_frames: int = 5     # retained for API compatibility; not used
+                                      # by select_prototypes (governed by k)
 
 
-def find_absent_clusters(
-    labeled_objects: list[LabeledObject],
-    all_cluster_ids: set[int],
-    min_cluster_confidence: float,
-) -> set[int]:
+@dataclass
+class ClusterQualityConfig:
     """
-    Find clusters that are absent from a single image.
+    Thresholds for determining whether a cluster represents a real organ.
 
-    A cluster is absent if no object in the image was assigned to it with
-    labeling_confidence >= min_cluster_confidence.
-
-    Parameters
-    ----------
-    labeled_objects : list[LabeledObject]
-        Labeled objects from a single image.
-    all_cluster_ids : set[int]
-        All known cluster IDs from the global clustering.
-    min_cluster_confidence : float
-        Threshold for considering a cluster "present" in an image.
-
-    Returns
-    -------
-    set[int]
-        Cluster IDs that are absent from this image.
+    A cluster passes if ALL three conditions hold (globally, across all images):
+      - it appears in at least min_image_frequency fraction of images
+      - its mean labeling confidence is >= min_avg_labeling_confidence
+      - its mean SAM segmentation score is >= min_avg_sam_confidence
+        (objects where SAM returned no score are excluded from the mean;
+         if no object has a score the cluster is not penalised for it)
     """
-    present_clusters = {
-        obj.organ_id
-        for obj in labeled_objects
-        if not obj.is_noise and obj.labeling_confidence >= min_cluster_confidence
-    }
-    return all_cluster_ids - present_clusters
+    min_image_frequency: float = 0.3
+    min_avg_labeling_confidence: float = 0.5
+    min_avg_sam_confidence: float = 0.60
 
 
-def select_reference_masks(
-    cluster_id: int,
+def compute_cluster_quality(
     labeled_by_image: dict[Path, list[LabeledObject]],
-    target_path: Path,
-    config: MaskSelectionConfig,
-) -> list[LabeledObject]:
+    config: ClusterQualityConfig,
+) -> dict[int, dict]:
     """
-    Select the best reference masks for a given cluster to use as context
-    frames in the video predictor.
-
-    Candidates come from all images except the target. They are ranked by
-    a combined score of SAM confidence and cluster membership confidence.
-
-    Parameters
-    ----------
-    cluster_id : int
-        The cluster whose masks we want to propagate.
-    labeled_by_image : dict[Path, list[LabeledObject]]
-        All labeled objects grouped by image path.
-    target_path : Path
-        Path of the target image (excluded from candidates).
-    config : MaskSelectionConfig
-        Selection hyperparameters.
-
-    Returns
-    -------
-    list[LabeledObject]
-        Top-K reference objects, sorted by descending combined score.
-        K = config.num_reference_frames.
-    """
-    alpha = config.sam_score_weight
-
-    candidates = []
-    for path, objects in labeled_by_image.items():
-        if path == target_path:
-            continue
-
-        for obj in objects:
-            if obj.organ_id != cluster_id or obj.is_noise:
-                continue
-
-            sam_score = obj.segmented_object.confidence or 0.0
-            cluster_conf = obj.labeling_confidence
-
-            combined = alpha * sam_score + (1.0 - alpha) * cluster_conf
-
-            if combined >= config.min_combined_score:
-                candidates.append((obj, combined))
-
-    # Sort by descending combined score
-    candidates.sort(key=lambda x: x[1], reverse=True)
-
-    # Truncate to num_reference_frames
-    selected = [obj for obj, _ in candidates[:config.num_reference_frames]]
-
-    return selected
-
-
-def get_good_cluster_ids(
-    labeled_by_image: dict[Path, list[LabeledObject]],
-    min_image_frequency: float = 0.3,
-) -> set[int]:
-    """
-    Return cluster IDs that appear in at least min_image_frequency fraction
-    of all images. Only these clusters are worth attempting to refine.
+    Return per-cluster quality metrics and pass/fail status.
 
     Parameters
     ----------
     labeled_by_image : dict[Path, list[LabeledObject]]
         All labeled objects grouped by image path.
-    min_image_frequency : float
-        Minimum fraction of images a cluster must appear in.
+    config : ClusterQualityConfig
+        The three quality thresholds.
 
     Returns
     -------
-    set[int]
-        Cluster IDs considered "good" for refinement.
+    dict[int, dict]
+        Maps cluster_id -> {
+            "image_frequency":          float,
+            "avg_labeling_confidence":  float,
+            "avg_sam_confidence":       float | None,
+            "n_objects":                int,
+            "good":                     bool,
+            "failed":                   list[str],  # empty when good=True
+        }
     """
     total_images = len(labeled_by_image)
     if total_images == 0:
-        return set()
+        return {}
 
-    cluster_image_count: dict[int, int] = {}
-    for path, objects in labeled_by_image.items():
-        present_ids = {obj.organ_id for obj in objects if not obj.is_noise}
-        for cid in present_ids:
-            cluster_image_count[cid] = cluster_image_count.get(cid, 0) + 1
+    all_valid = [
+        obj
+        for objs in labeled_by_image.values()
+        for obj in objs
+        if not obj.is_noise and obj.organ_id != -1
+    ]
 
+    report: dict[int, dict] = {}
+    for cid in sorted({obj.organ_id for obj in all_valid}):
+        members = [obj for obj in all_valid if obj.organ_id == cid]
+
+        unique_images = {obj.segmented_object.source_image.source_path for obj in members}
+        image_freq = len(unique_images) / total_images
+
+        avg_lconf = sum(obj.labeling_confidence for obj in members) / len(members)
+
+        sam_scores = [
+            obj.segmented_object.confidence
+            for obj in members
+            if obj.segmented_object.confidence is not None
+        ]
+        avg_sam = (sum(sam_scores) / len(sam_scores)) if sam_scores else None
+
+        failed = []
+        if image_freq < config.min_image_frequency:
+            failed.append(
+                f"image_frequency={image_freq:.3f} < {config.min_image_frequency}"
+            )
+        if avg_lconf < config.min_avg_labeling_confidence:
+            failed.append(
+                f"avg_labeling_confidence={avg_lconf:.3f} < {config.min_avg_labeling_confidence}"
+            )
+        if avg_sam is not None and avg_sam < config.min_avg_sam_confidence:
+            failed.append(
+                f"avg_sam_confidence={avg_sam:.3f} < {config.min_avg_sam_confidence}"
+            )
+
+        report[cid] = {
+            "image_frequency": round(image_freq, 4),
+            "avg_labeling_confidence": round(avg_lconf, 4),
+            "avg_sam_confidence": round(avg_sam, 4) if avg_sam is not None else None,
+            "n_objects": len(members),
+            "good": len(failed) == 0,
+            "failed": failed,
+        }
+
+    return report
+
+
+def identify_good_clusters(
+    labeled_by_image: dict[Path, list[LabeledObject]],
+    config: ClusterQualityConfig,
+) -> set[int]:
+    """
+    Return cluster IDs that pass all three quality thresholds.
+
+    Delegates to compute_cluster_quality; kept as a thin wrapper so call
+    sites that only need the set don't change.
+    """
     return {
         cid
-        for cid, count in cluster_image_count.items()
-        if count / total_images >= min_image_frequency
+        for cid, info in compute_cluster_quality(labeled_by_image, config).items()
+        if info["good"]
     }
 
 
-# -----------------------------------------------------------------------
-# Reference index for O(K) lookup (replaces O(N) scan in select_reference_masks)
-# -----------------------------------------------------------------------
-
-from dataclasses import dataclass as _dataclass, field as _field
-from collections import defaultdict as _defaultdict
-
-
-@_dataclass
-class ReferenceIndex:
-    """
-    Pre-built lookup index: cluster_id -> candidates sorted by descending
-    combined score.  Built once per refinement pass; enables O(K) selection
-    instead of the O(N*k) full-dict scan in select_reference_masks.
-    """
-    _data: dict[int, list[tuple[float, Path, LabeledObject]]] = _field(
-        default_factory=lambda: _defaultdict(list)
-    )
-
-
-def build_reference_index(
+def select_prototypes(
     labeled_by_image: dict[Path, list[LabeledObject]],
+    good_clusters: set[int],
+    k: int,
     config: MaskSelectionConfig,
-) -> ReferenceIndex:
+) -> dict[int, list[LabeledObject]]:
     """
-    Scan labeled_by_image once and build a per-cluster sorted candidate list.
+    Select the top-k prototype masks for each good cluster.
 
-    O(N * k) one-time cost, where N = number of images and k = objects per
-    image.  After this, each select_from_index call costs O(K) where K =
-    num_reference_frames.
+    Only non-noise objects whose combined score meets config.min_combined_score
+    are considered.  Each cluster's candidates are sorted by descending combined
+    score and truncated to k.  Clusters with no qualifying objects appear in
+    the result with an empty list.
 
     Parameters
     ----------
     labeled_by_image : dict[Path, list[LabeledObject]]
-        Full labeled dataset (or a snapshot thereof).
+        All labeled objects grouped by image path.
+    good_clusters : set[int]
+        Cluster IDs to build prototypes for (from identify_good_clusters).
+    k : int
+        Maximum number of prototype masks per cluster.
     config : MaskSelectionConfig
-        Used for sam_score_weight and min_combined_score filtering.
+        Provides sam_score_weight (alpha) and min_combined_score.
+        num_reference_frames is NOT used here; k governs the limit.
 
     Returns
     -------
-    ReferenceIndex
-        Ready-to-query index.
+    dict[int, list[LabeledObject]]
+        Maps cluster_id -> list of up to k objects, best-scored first.
     """
     alpha = config.sam_score_weight
-    idx = ReferenceIndex()
+    candidates: dict[int, list[tuple[float, LabeledObject]]] = {
+        cid: [] for cid in good_clusters
+    }
 
-    for path, objects in labeled_by_image.items():
-        for obj in objects:
-            if obj.is_noise or obj.organ_id == -1:
+    for objs in labeled_by_image.values():
+        for obj in objs:
+            if obj.is_noise or obj.organ_id not in good_clusters:
                 continue
             sam_score = obj.segmented_object.confidence or 0.0
-            combined = alpha * sam_score + (1.0 - alpha) * obj.labeling_confidence
-            if combined >= config.min_combined_score:
-                idx._data[obj.organ_id].append((combined, path, obj))
+            score = alpha * sam_score + (1.0 - alpha) * obj.labeling_confidence
+            if score >= config.min_combined_score:
+                candidates[obj.organ_id].append((score, obj))
 
-    # Sort once per cluster; from here on lookups are just slices
-    for cid in idx._data:
-        idx._data[cid].sort(key=lambda x: -x[0])
+    result: dict[int, list[LabeledObject]] = {}
+    for cid, scored in candidates.items():
+        scored.sort(key=lambda x: -x[0])
+        result[cid] = [obj for _, obj in scored[:k]]
 
-    return idx
-
-
-def select_from_index(
-    cluster_id: int,
-    target_path: Path,
-    index: ReferenceIndex,
-    config: MaskSelectionConfig,
-) -> list[LabeledObject]:
-    """
-    Return the top-K references for cluster_id, excluding target_path.
-
-    O(K) — iterates the pre-sorted candidate list and stops once K non-target
-    entries have been collected.
-
-    Parameters
-    ----------
-    cluster_id : int
-        Cluster to look up.
-    target_path : Path
-        Image being refined; excluded from candidates.
-    index : ReferenceIndex
-        Pre-built index (from build_reference_index).
-    config : MaskSelectionConfig
-        Used for num_reference_frames only (score filter already applied at
-        index build time).
-
-    Returns
-    -------
-    list[LabeledObject]
-        Up to config.num_reference_frames objects, best-scored first.
-    """
-    selected = []
-    for _score, path, obj in index._data.get(cluster_id, []):
-        if path == target_path:
-            continue
-        selected.append(obj)
-        if len(selected) >= config.num_reference_frames:
-            break
-    return selected
+    return result

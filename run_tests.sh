@@ -296,7 +296,10 @@ python compare_versions.py \
     --versions    "${VERSION}" \
     --datasets    XRayNicoSent SunnybrookNicoSent \
     --output      "${RESULTS_ROOT}/comparison_${VERSION}" \
-    --skip-metric-story
+    --configs     unsup_hdbscan unsup_hdbscan_refine fs_iter_refine_1ref \
+    --feature-versions "${VERSION}:${VERSION}" \
+    --dataset-labels  XRayNicoSent:JSRT SunnybrookNicoSent:Sunnybrook \
+    --skip-recovery
 
 done_
 

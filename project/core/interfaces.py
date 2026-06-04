@@ -7,27 +7,6 @@ import numpy as np
 
 from project.core.data_types import MedicalImage, SegmentedObject, LabeledObject
 
-if TYPE_CHECKING:
-    import torch
-
-
-class VideoSegmenter(Protocol):
-    """Protocol for segmenters that support multi-reference video propagation.
-
-    Decouples RetroactiveRefiner from the concrete MedSAM2Segmenter so that
-    alternative implementations (e.g., stubs in tests) satisfy the interface
-    without inheriting from a GPU-heavy class.
-    """
-
-    def segment_with_multi_reference(
-        self,
-        target_image: MedicalImage,
-        reference_entries: list[tuple[np.ndarray, np.ndarray]],
-        organ_name: str,
-    ) -> SegmentedObject | None: ...
-
-    def encode_image(self, image: MedicalImage) -> torch.Tensor: ...
-
 
 class ImageReader(ABC):
     @abstractmethod
@@ -66,38 +45,55 @@ class Labeler(ABC):
         ...
 
 
-class Refiner(ABC):
+class VideoSegmenter(Protocol):
+    """Protocol for segmenters that support independent multi-reference propagation.
+
+    Each call to segment_with_video_prompts runs a fresh (K+1)-frame video
+    session using only the provided references — no state is shared between
+    calls.  Decouples PrototypePropagator from MedSAM2Segmenter so that stubs
+    satisfy the interface in tests without loading the GPU model.
     """
-    Abstract base class for retroactive refinement.
- 
-    A Refiner attempts to recover organs that were missed during initial
-    segmentation by using evidence from other images in the dataset.
-    It operates after clustering and labeling, and produces new objects
-    that inherit cluster labels directly (no re-clustering).
-    """
- 
-    @abstractmethod
-    def refine(
+
+    def segment_with_video_prompts(
         self,
-        objects_by_image: dict[Path, list[SegmentedObject]],
-        labeled_by_image: dict[Path, list[LabeledObject]],
-        reader: ImageReader,
-    ) -> tuple[dict[Path, list[SegmentedObject]], dict[Path, list[LabeledObject]]]:
+        target_image: "MedicalImage",
+        references: list,
+    ) -> "list[SegmentedObject]": ...
+
+
+class Propagator(ABC):
+    """Abstract base class for prototype-based batch propagation.
+
+    Identifies good clusters from clustering output, selects top-K prototypes
+    per cluster, and propagates all clusters to every target image in a single
+    batch video pass.
+    """
+
+    @abstractmethod
+    def propagate(
+        self,
+        labeled_by_image: "dict[Path, list[LabeledObject]]",
+        target_paths: "list[Path]",
+        reader: "ImageReader",
+    ) -> "tuple[dict[Path, list[LabeledObject]], list[dict]]":
         """
-        Attempt to recover missing clusters in each image.
- 
         Parameters
         ----------
-        objects_by_image : dict[Path, list[SegmentedObject]]
-            All segmented objects grouped by image path.
         labeled_by_image : dict[Path, list[LabeledObject]]
-            All labeled objects grouped by image path.
+            Clustering result from Phase 2 (used to identify good clusters
+            and select prototypes).
+        target_paths : list[Path]
+            Images to propagate to.  May overlap with the clustering images.
         reader : ImageReader
-            Used to reload images from disk for the video predictor.
- 
+            Used to reload pixel data when source_image.volume is None
+            (e.g. when Phase 1 output was loaded from cache).
+
         Returns
         -------
-        tuple of (updated objects_by_image, updated labeled_by_image)
-            Both dicts are updated in-place and returned for convenience.
+        labeled_by_image : dict[Path, list[LabeledObject]]
+            Fresh dict containing only the propagated masks.
+        memory_composition : list[dict]
+            Per reference-frame metadata: frame_idx, obj_id, cluster_id,
+            source_path, mask (np.ndarray), combined_score, area.
         """
         ...

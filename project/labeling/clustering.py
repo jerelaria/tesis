@@ -52,6 +52,14 @@ class HDBSCANConfig:
     min_cluster_size_fraction: float | None = None
     min_samples_fraction: float | None = None
     metric: str = "euclidean"
+    cluster_selection_method: str = "eom"
+
+    def __post_init__(self):
+        if self.cluster_selection_method not in ("eom", "leaf"):
+            raise ValueError(
+                f"cluster_selection_method must be 'eom' or 'leaf', "
+                f"got '{self.cluster_selection_method}'"
+            )
 
     def resolve(self, num_images: int) -> "HDBSCANConfig":
         """
@@ -85,7 +93,11 @@ class HDBSCANConfig:
         if ms is None:
             ms = 1
 
-        return HDBSCANConfig(min_cluster_size=mcs, min_samples=ms)
+        return HDBSCANConfig(
+            min_cluster_size=mcs,
+            min_samples=ms,
+            cluster_selection_method=self.cluster_selection_method,
+        )
 
 
 @dataclass
@@ -373,6 +385,7 @@ class ClusteringLabeler(Labeler):
                 min_cluster_size=mcs,
                 min_samples=ms,
                 metric=self.config.hdbscan.metric,
+                cluster_selection_method=self.config.hdbscan.cluster_selection_method,
             )
         raise NotImplementedError(f"Algorithm '{self.config.algorithm}' is not implemented.")
 

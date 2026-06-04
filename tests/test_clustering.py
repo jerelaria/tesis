@@ -89,3 +89,68 @@ def test_embeddings_only_without_enabled_raises():
     """features=None without embedding.enabled=True must raise ValueError."""
     with pytest.raises(ValueError, match="embedding"):
         ClusteringConfig(features=None)
+
+
+# ------------------------------------------------------------------
+# cluster_selection_method tests
+# ------------------------------------------------------------------
+
+def test_hdbscan_default_cluster_selection_method():
+    """Default cluster_selection_method must be 'eom' (backward-compatible with sklearn)."""
+    cfg = HDBSCANConfig(min_cluster_size=2, min_samples=1)
+    assert cfg.cluster_selection_method == "eom"
+
+    labeler = ClusteringLabeler(
+        ClusteringConfig(algorithm=ClusteringAlgorithm.HDBSCAN, hdbscan=cfg)
+    )
+    assert labeler._model.cluster_selection_method == "eom"
+
+
+def test_hdbscan_leaf_propagates_to_model():
+    """cluster_selection_method='leaf' must reach the sklearn HDBSCAN instance."""
+    cfg = HDBSCANConfig(min_cluster_size=2, min_samples=1, cluster_selection_method="leaf")
+    labeler = ClusteringLabeler(
+        ClusteringConfig(algorithm=ClusteringAlgorithm.HDBSCAN, hdbscan=cfg)
+    )
+    assert labeler._model.cluster_selection_method == "leaf"
+
+
+def test_hdbscan_invalid_cluster_selection_method_raises():
+    """Any value other than 'eom' or 'leaf' must raise ValueError at config build time."""
+    with pytest.raises(ValueError, match="cluster_selection_method"):
+        HDBSCANConfig(cluster_selection_method="invalid")
+
+
+def test_hdbscan_default_matches_explicit_eom():
+    """Sanity: default config produces the same result as an explicit 'eom'."""
+    n_features = len(FEATURE_NAMES)
+    centers = [np.zeros(n_features), np.ones(n_features) * 5.0]
+    all_objects = [obj for c in centers for obj in _make_group(c, n=15)]
+
+    cfg_default = ClusteringConfig(
+        algorithm=ClusteringAlgorithm.HDBSCAN,
+        hdbscan=HDBSCANConfig(min_cluster_size=5, min_samples=1),
+    )
+    cfg_explicit_eom = ClusteringConfig(
+        algorithm=ClusteringAlgorithm.HDBSCAN,
+        hdbscan=HDBSCANConfig(min_cluster_size=5, min_samples=1, cluster_selection_method="eom"),
+    )
+
+    labeler_default = ClusteringLabeler(cfg_default)
+    labeler_eom = ClusteringLabeler(cfg_explicit_eom)
+    labeler_default.fit(all_objects)
+    labeler_eom.fit(all_objects)
+
+    ids_default = [labeler_default._id_to_cluster[o.id] for o in all_objects]
+    ids_eom = [labeler_eom._id_to_cluster[o.id] for o in all_objects]
+    assert ids_default == ids_eom, "Default and explicit 'eom' must produce identical assignments"
+
+
+def test_hdbscan_resolve_preserves_cluster_selection_method():
+    """resolve() must carry cluster_selection_method to the returned config."""
+    cfg = HDBSCANConfig(
+        min_cluster_size_fraction=0.1,
+        cluster_selection_method="leaf",
+    )
+    resolved = cfg.resolve(num_images=50)
+    assert resolved.cluster_selection_method == "leaf"

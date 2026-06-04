@@ -77,7 +77,7 @@ class LabeledObject:
         probability or distance-based score).
     method_used : str
         Tag indicating how this object was produced, e.g. "kmeans",
-        "refinement_multi_reference", "refinement_improved".
+        "propagation", "few_shot_baseline", "unsupervised_baseline".
     is_noise : bool
         True when the cluster filter (Phase 5) marks this object as belonging
         to a low-quality cluster. Noise objects are excluded from saved masks.

@@ -22,7 +22,7 @@ class SegmentationResolution:
     preloaded   – (all_objects, objects_by_image) on cache hit; None otherwise.
     seg_fingerprint – cache dir name to record in resolved_config.json.
     need_segmenter  – feed to build_pipeline_from_config; True when Phase 1
-                      or refinement will use the GPU model.
+                      or propagation will use the GPU model.
     compute_fn  – call as compute_fn(pipeline) after building the pipeline when
                   not None; runs Phase 1 and writes the cache, then returns
                   (all_objects, objects_by_image). None on cache hit or bypass.
@@ -70,7 +70,14 @@ def resolve_segmentation(
     dir_name = cache_dir_name(payload)
     cache_dir = Path(args.seg_cache_dir) / dataset_short / dir_name
 
-    refinement_enabled = cfg.get("refinement", {}).get("enabled", False)
+    # Propagation always needs the GPU model; only skip loading it when
+    # clustering is disabled (baseline mode, early-exit path).
+    _mode = cfg.get("mode", "unsupervised")
+    if _mode == "few_shot":
+        clustering_enabled = cfg.get("few_shot", {}).get("clustering_enabled", True)
+    else:
+        clustering_enabled = cfg.get("unsupervised", {}).get("clustering_enabled", True)
+
     cache_hit = cache_dir.exists() and not args.refresh_seg
     will_compute = args.segmentation_only or args.compute_seg_if_missing or args.refresh_seg
 
@@ -83,7 +90,7 @@ def resolve_segmentation(
         return SegmentationResolution(
             preloaded=load_segmented(cache_dir),
             seg_fingerprint=dir_name,
-            need_segmenter=refinement_enabled,
+            need_segmenter=clustering_enabled,
         )
 
     if not will_compute:

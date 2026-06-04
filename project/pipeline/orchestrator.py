@@ -1,4 +1,4 @@
-"""Pipeline orchestrator: executes the five-phase co-segmentation pipeline."""
+"""Pipeline orchestrator: clustering → propagation."""
 
 import logging
 from pathlib import Path
@@ -8,7 +8,6 @@ from project.data_io.reader import MedicalImageReader
 from project.evaluation.visualizer import save_visualization
 from project.feature_extraction.moments import MomentFeatureExtractor
 from project.labeling.clustering import ClusteringLabeler, ClusteringConfig
-from project.labeling.clustering_filter import ClusterFilter, ClusterFilterConfig
 from project.segmentation.medsam2 import MedSAM2Segmenter, MedSAM2Config
 from project.pipeline.phase1_unsupervised import run_phase1_unsupervised
 from project.pipeline.phase1_few_shot import (
@@ -16,11 +15,22 @@ from project.pipeline.phase1_few_shot import (
     run_phase1_few_shot_iterative,
 )
 from project.pipeline.persistence import save_predicted_masks, print_summary
+from project.pipeline.propagator import PropagationConfig, PrototypePropagator
+from project.pipeline.phase2_debug import ClusteringDebugWriter
 
 logger = logging.getLogger(__name__)
 
 
 class Pipeline:
+    """
+    Linear co-segmentation pipeline:
+
+      Phase 1 — Segmentation + Feature Extraction
+      Phase 2 — Clustering
+      Phase 3 — Semantic Cluster Mapping  (few-shot only)
+      Phase 4 — Prototype Propagation
+    """
+
     def __init__(
         self,
         mode: str,
@@ -28,8 +38,7 @@ class Pipeline:
         segmenter: MedSAM2Segmenter | None,
         extractor: MomentFeatureExtractor,
         labeler: ClusteringLabeler | None,
-        refiner,
-        cluster_filter: ClusterFilter,
+        propagator: PrototypePropagator | None,
         results_dir: Path,
         extract_embeddings: bool = False,
         propagation_mode: str = "independent",
@@ -39,11 +48,11 @@ class Pipeline:
         self.segmenter = segmenter
         self.extractor = extractor
         self.labeler = labeler
-        self.refiner = refiner
-        self.cluster_filter = cluster_filter
+        self.propagator = propagator
         self.results_dir = results_dir
         self.extract_embeddings = extract_embeddings
         self.propagation_mode = propagation_mode
+        self.debug_writer: ClusteringDebugWriter | None = None
 
     def run(
         self,
@@ -64,17 +73,26 @@ class Pipeline:
         if self.labeler is None:
             return self._baseline_label(all_objects, objects_by_image, references)
 
-        labeled_by_image = self.phase2(all_objects, objects_by_image)
+        labeled_by_image_clustering = self.phase2(all_objects, objects_by_image)
 
         if self.mode == "few_shot":
-            labeled_by_image = self.phase3(labeled_by_image)
+            labeled_by_image_clustering = self.phase3(labeled_by_image_clustering)
 
-        if self.refiner is not None:
-            objects_by_image, labeled_by_image = self.phase4(
-                objects_by_image, labeled_by_image
+        labeled_by_image, memory = self.phase4_propagate(
+            labeled_by_image_clustering, list(objects_by_image.keys())
+        )
+
+        if self.debug_writer is not None:
+            features_csv = self.results_dir / "phase2_clustering" / "clustering_features.csv"
+            self.debug_writer.write_all(
+                labeled_by_image_clustering=labeled_by_image_clustering,
+                labeled_by_image_propagated=labeled_by_image,
+                memory_composition=memory,
+                propagation_config=self.propagator.config,
+                features_csv=features_csv,
+                image_paths=list(objects_by_image.keys()),
             )
 
-        labeled_by_image = self.phase5(labeled_by_image)
         save_predicted_masks(labeled_by_image, self.results_dir)
         print_summary(all_objects, labeled_by_image)
         return labeled_by_image
@@ -150,44 +168,28 @@ class Pipeline:
 
         return labeled_by_image
 
-    def phase4(self, objects_by_image, labeled_by_image):
-        """Phase 4 updates both dicts: refiner may add recovered objects to both."""
+    def phase4_propagate(
+        self,
+        labeled_by_image: dict[Path, list[LabeledObject]],
+        target_paths: list[Path],
+    ) -> tuple[dict[Path, list[LabeledObject]], list[dict]]:
         logger.info("=" * 60)
-        logger.info("Phase 4: Retroactive Refinement")
+        logger.info("Phase 4: Prototype Propagation")
         logger.info("=" * 60)
 
-        phase4_dir = self.results_dir / "phase4_refinement"
+        phase4_dir = self.results_dir / "phase4_propagation"
         phase4_dir.mkdir(exist_ok=True)
 
-        objects_by_image, labeled_by_image = self.refiner.refine(
-            objects_by_image, labeled_by_image, self.reader
+        labeled_by_image, memory = self.propagator.propagate(
+            labeled_by_image=labeled_by_image,
+            target_paths=target_paths,
+            reader=self.reader,
         )
 
         for path, labeled in labeled_by_image.items():
-            save_visualization(path, labeled, phase4_dir, suffix="_refined")
+            save_visualization(path, labeled, phase4_dir, suffix="_propagated")
 
-        return objects_by_image, labeled_by_image
-
-    def phase5(self, labeled_by_image):
-        logger.info("=" * 60)
-        logger.info("Phase 5: Cluster Filtering")
-        logger.info("=" * 60)
-
-        phase5_dir = self.results_dir / "phase5_filtered"
-        phase5_dir.mkdir(exist_ok=True)
-
-        labeled_by_image = self.cluster_filter.filter(labeled_by_image)
-
-        if self.cluster_filter.config.deduplicate_per_image:
-            logger.info("Per-image deduplication:")
-            labeled_by_image = self.cluster_filter.deduplicate_per_image(
-                labeled_by_image
-            )
-
-        for path, labeled in labeled_by_image.items():
-            save_visualization(path, labeled, phase5_dir, suffix="_final")
-
-        return labeled_by_image
+        return labeled_by_image, memory
 
     # ------------------------------------------------------------------
     # Baseline early-exit (clustering disabled)
@@ -195,7 +197,7 @@ class Pipeline:
 
     def _baseline_label(self, all_objects, objects_by_image, references):
         logger.info("[BASELINE] clustering_enabled=false -> "
-                    "skipping phases 2-5, using MedSAM2 labels directly")
+                    "skipping phases 2-4, using MedSAM2 labels directly")
 
         organ_name_to_id: dict[str, int] = {}
         if self.mode == "few_shot" and references is not None:
@@ -217,7 +219,6 @@ class Pipeline:
                     organ_name = obj.label or "unknown"
                     organ_id = organ_name_to_id.get(obj.label, 0)
                 else:
-                    # Unsupervised: positional name avoids PNG collisions.
                     organ_name = f"obj_{local_idx:03d}"
                     organ_id = local_idx
 
@@ -248,8 +249,8 @@ def build_pipeline_from_config(
 ) -> Pipeline:
     """Construct a Pipeline from a resolved YAML config dict.
 
-    Set need_segmenter=False when Phase 1 output is loaded from cache and
-    refinement is disabled; this skips the expensive GPU model load.
+    Set need_segmenter=False only when Phase 1 is cached AND clustering is
+    disabled (baseline mode).  Propagation always requires the GPU model.
     """
     mode = cfg.get("mode", "unsupervised")
 
@@ -262,10 +263,8 @@ def build_pipeline_from_config(
         segmenter: MedSAM2Segmenter | None = MedSAM2Segmenter(MedSAM2Config(**seg_cfg))
     else:
         segmenter = None
-        logger.info("Segmenter not loaded (using cached segmentation)")
+        logger.info("Segmenter not loaded (using cached segmentation, baseline mode)")
 
-    # Clustering can be disabled to benchmark raw MedSAM2 output as a
-    # minimal-pipeline baseline.
     clustering_enabled = True
     if mode == "few_shot":
         clustering_enabled = cfg.get("few_shot", {}).get("clustering_enabled", True)
@@ -297,7 +296,7 @@ def build_pipeline_from_config(
             logger.info(f"Moment features: {len(labeler.config.features)} selected")
     else:
         logger.info("[BASELINE] clustering_enabled=false -> "
-                    "skipping phases 2-5, using MedSAM2 labels directly")
+                    "skipping phases 2-4, using MedSAM2 labels directly")
 
     extract_embeddings = (
         cfg.get("labeler", {}).get("embedding", {}).get("enabled", False)
@@ -312,30 +311,44 @@ def build_pipeline_from_config(
         )
         logger.info(f"Propagation mode: {propagation_mode}")
 
-    refiner = None
-    refinement_cfg = cfg.get("refinement", {})
-    if refinement_cfg.get("enabled", False):
-        from project.segmentation.refinement import RetroactiveRefiner, RefinementConfig
-        refiner = RetroactiveRefiner(
+    propagator = None
+    debug_writer = None
+    if clustering_enabled:
+        if segmenter is None:
+            raise RuntimeError(
+                "Segmenter required for propagation but not loaded. "
+                "This is a configuration error: need_segmenter must be True "
+                "when clustering is enabled."
+            )
+        propagation_cfg = cfg.get("propagation", {})
+        propagator = PrototypePropagator(
             segmenter=segmenter,
-            extractor=extractor,
-            config=RefinementConfig(**refinement_cfg),
-            labeler=labeler,
-            extract_embeddings=extract_embeddings,
-            debug_dir=results_dir / "phase4_refinement",
+            config=PropagationConfig(**propagation_cfg),
+        )
+        logger.info(
+            f"Propagator: references_per_cluster="
+            f"{propagator.config.references_per_cluster}"
         )
 
-    cluster_filter = ClusterFilter(ClusterFilterConfig(**cfg.get("cluster_filter", {})))
+        debug_cfg = cfg.get("debug", {})
+        n_preview = debug_cfg.get("n_preview", 10)
+        seed = debug_cfg.get("seed", 42)
+        debug_writer = ClusteringDebugWriter(
+            phase2_dir=results_dir / "phase2_clustering",
+            n_preview=n_preview,
+            seed=seed,
+        )
 
-    return Pipeline(
+    pipeline = Pipeline(
         mode=mode,
         reader=reader,
         segmenter=segmenter,
         extractor=extractor,
         labeler=labeler,
-        refiner=refiner,
-        cluster_filter=cluster_filter,
+        propagator=propagator,
         results_dir=results_dir,
         extract_embeddings=extract_embeddings,
         propagation_mode=propagation_mode,
     )
+    pipeline.debug_writer = debug_writer
+    return pipeline

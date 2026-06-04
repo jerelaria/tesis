@@ -141,7 +141,7 @@ def make_point_grid(h: int, w: int, grid_side: int = 6) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Connected-component filtering (used by refinement)
+# Connected-component filtering (used by propagation)
 # ---------------------------------------------------------------------------
 
 def reference_centroid(
