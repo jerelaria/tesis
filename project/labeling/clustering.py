@@ -16,7 +16,6 @@ from enum import Enum
 from sklearn.cluster import KMeans, DBSCAN, HDBSCAN
 from sklearn.preprocessing import StandardScaler
 from pathlib import Path
-from sklearn.neighbors import NearestNeighbors
 
 logger = logging.getLogger(__name__)
 
@@ -281,8 +280,6 @@ class ClusteringLabeler(Labeler):
         logger.debug(f"Noise points: {(cluster_ids == -1).sum()}")
         logger.debug(f"Total points: {len(cluster_ids)}")
         self._id_to_cluster = {obj.id: int(cid) for obj, cid in zip(objects, cluster_ids)}
-        self._fit_X = X                   # kept for NN-based predict_new
-        self._fit_cluster_ids = cluster_ids.astype(int)
         self._is_fitted = True
 
     def label(self, objects: list[SegmentedObject]) -> list[LabeledObject]:
@@ -319,44 +316,6 @@ class ClusteringLabeler(Labeler):
                 organ_name=f"cluster_{cluster_id}",
                 labeling_confidence=float(confidence),
                 method_used=f"clustering_{self.config.algorithm.value}",
-            ))
-
-        return labeled
-
-    def predict_new(self, objects: list[SegmentedObject]) -> list[LabeledObject]:
-        """Assign cluster IDs to objects that were NOT seen during fit().
-
-        For KMeans: uses the fitted centroids (model.predict).
-        For DBSCAN/HDBSCAN: assigns to the nearest-neighbor cluster from
-        the fit-time feature matrix (1-NN in feature space).
-
-        Raises
-        ------
-        RuntimeError
-            If called before fit().
-        """
-        if not self._is_fitted:
-            raise RuntimeError("ClusteringLabeler must be fitted before calling predict_new().")
-
-        X = self._extract_feature_matrix(objects)
-
-        if self.config.algorithm == ClusteringAlgorithm.KMEANS:
-            cluster_ids = self._model.predict(X).astype(int)
-        else:
-            nn = NearestNeighbors(n_neighbors=1).fit(self._fit_X)
-            indices = nn.kneighbors(X, return_distance=False)[:, 0]
-            cluster_ids = self._fit_cluster_ids[indices]
-
-        confidences = self._compute_confidences(X, cluster_ids)
-
-        labeled = []
-        for obj, cluster_id, confidence in zip(objects, cluster_ids, confidences):
-            labeled.append(LabeledObject(
-                segmented_object=obj,
-                organ_id=int(cluster_id),
-                organ_name=f"cluster_{cluster_id}",
-                labeling_confidence=float(confidence),
-                method_used=f"clustering_{self.config.algorithm.value}_predict_new",
             ))
 
         return labeled

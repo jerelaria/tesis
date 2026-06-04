@@ -33,7 +33,7 @@ class SegmentedObject:
     ------
     mask : np.ndarray
         Binary segmentation mask (H, W) bool, produced by MedSAM2Segmenter
-        (Phase 1). May be replaced in-place by the refiner (Phase 4).
+        (Phase 1).
     source_image : MedicalImage
         The parent image this object was segmented from.
     id : str
@@ -70,8 +70,9 @@ class LabeledObject:
     organ_id : int
         Numeric cluster identifier assigned by the labeler (Phase 2).
     organ_name : str
-        Human-readable organ name. Set by the semantic mapper (Phase 3) in
-        few-shot mode, or derived from the cluster ID in unsupervised mode.
+        Human-readable organ name. In unsupervised mode: "cluster_N" after
+        Phase 2, updated to the propagated label after Phase 4.
+        In few-shot mode: the organ name from the reference annotations.
     labeling_confidence : float
         Clustering assignment confidence from Phase 2 (e.g. soft-assignment
         probability or distance-based score).
@@ -79,8 +80,9 @@ class LabeledObject:
         Tag indicating how this object was produced, e.g. "kmeans",
         "propagation", "few_shot_baseline", "unsupervised_baseline".
     is_noise : bool
-        True when the cluster filter (Phase 5) marks this object as belonging
-        to a low-quality cluster. Noise objects are excluded from saved masks.
+        True if this object is excluded from quality scoring and prototype
+        selection. HDBSCAN noise points use organ_id=-1 by convention; this
+        flag is reserved for explicit per-object exclusion.
     """
 
     segmented_object: SegmentedObject

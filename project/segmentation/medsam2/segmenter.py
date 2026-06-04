@@ -34,18 +34,15 @@ class MedSAM2Segmenter(Segmenter):
     """
     Segment a MedicalImage using MedSAM2.
 
-    Four public methods:
+    Three public methods:
 
-    1. segment() — grid of points, image predictor. Unsupervised mode only.
+    1. segment() — grid of points, image predictor. Unsupervised Phase 1 only.
 
-    2. segment_with_video_prompts() — (K+1)-frame video: K reference images
-       (each with multiple organ masks) + 1 target. Independent mode.
+    2. segment_with_video_prompts() — (K+1)-frame video: K reference frames
+       (each with multiple organ masks) + 1 target. Independent propagation.
 
     3. segment_batch_iterative() — (K+N)-frame video: K references + N targets.
        Memory accumulates from references AND previously segmented targets.
-
-    4. segment_with_multi_reference() — (K+1)-frame video: K references each
-       showing ONE organ + 1 target. Used exclusively by refinement.
 
     The video predictor is lazy-loaded on first use.
     """
@@ -172,55 +169,6 @@ class MedSAM2Segmenter(Segmenter):
             f"[VIDEO BATCH] {propagated_count} objects across {len(target_entries)} images"
         )
         return results
-
-    def segment_with_multi_reference(
-        self,
-        target_image: MedicalImage,
-        reference_entries: list[tuple[np.ndarray, np.ndarray]],
-        organ_name: str,
-    ) -> SegmentedObject | None:
-        if not reference_entries:
-            return None
-
-        video_pred = self._get_video_predictor()
-        ref_uint8s = [to_uint8(vol) for vol, _ in reference_entries]
-        tgt_uint8 = to_uint8(target_image.volume)
-        target_frame_idx = len(reference_entries)
-
-        def _register(vp, st):
-            for i, (_, ref_mask) in enumerate(reference_entries):
-                vp.add_new_mask(
-                    inference_state=st,
-                    frame_idx=i,
-                    obj_id=1,
-                    mask=ref_mask.astype(np.float32),
-                )
-            return None
-
-        result = None
-        with _video_session(video_pred, ref_uint8s, [tgt_uint8], _register) as (state, _):
-            for frame_idx, obj_ids, video_res_masks in video_pred.propagate_in_video(state):
-                if frame_idx != target_frame_idx:
-                    continue
-                if len(video_res_masks) == 0:
-                    continue
-
-                logits = video_res_masks[0].cpu().numpy().squeeze()
-                binary_mask = logits > 0.0
-
-                if not binary_mask.any():
-                    logger.debug(f"[MULTI-REF] Empty mask for '{organ_name}'")
-                    break
-
-                result = SegmentedObject(
-                    mask=binary_mask,
-                    source_image=target_image,
-                    confidence=logits_to_confidence(logits, binary_mask),
-                    label=organ_name,
-                )
-                break
-
-        return result
 
     def _get_video_predictor(self):
         if self._video_predictor is None:

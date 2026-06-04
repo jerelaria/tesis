@@ -31,7 +31,7 @@ set -e
 #   # Run only the few-shot baseline as its own version
 #   ./run_all.sh v0_baseline_fs XRayNicoSent/images \
 #       --skip-unsup \
-#       --fs-configs configs/experiments/fs_indep_baseline.yaml \
+#       --fs-configs configs/experiments/fs_baseline.yaml \
 #       --fs-sizes 1 5 10
 #
 #   # Quick test with 10 images
@@ -63,17 +63,16 @@ SKIP_PLOTS=false
 # can override them without being clobbered afterwards.
 
 UNSUPERVISED_CONFIGS=(
-    configs/experiments/unsup_kmeans.yaml
-    configs/experiments/unsup_kmeans_refine.yaml
+    configs/experiments/unsup_baseline.yaml
     configs/experiments/unsup_hdbscan.yaml
-    configs/experiments/unsup_hdbscan_refine.yaml
+    configs/experiments/unsup_hdbscan_propagation.yaml
+    configs/experiments/unsup_hdbscan_propagation_iter.yaml
 )
 
 FEW_SHOT_CONFIGS=(
-    configs/experiments/fs_indep.yaml
-    configs/experiments/fs_indep_refine.yaml
-    configs/experiments/fs_iter.yaml
-    configs/experiments/fs_iter_refine.yaml
+    configs/experiments/fs_baseline.yaml
+    configs/experiments/fs_propagation.yaml
+    configs/experiments/fs_propagation_iter.yaml
 )
 
 

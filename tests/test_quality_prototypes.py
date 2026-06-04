@@ -273,12 +273,10 @@ def test_select_prototypes_all_clusters_present_as_keys():
     assert 1 in result
 
 
-def test_select_prototypes_num_reference_frames_not_used():
-    """k must govern the limit, not MaskSelectionConfig.num_reference_frames."""
+def test_select_prototypes_k_governs_limit():
+    """k must govern the number of prototypes returned per cluster."""
     dataset = _build_dataset(n_images=20, cluster_ids=[0])
-    cfg = MaskSelectionConfig(
-        sam_score_weight=0.5, min_combined_score=0.0, num_reference_frames=2
-    )
+    cfg = MaskSelectionConfig(sam_score_weight=0.5, min_combined_score=0.0)
     result = select_prototypes(dataset, good_clusters={0}, k=7, config=cfg)
     assert len(result[0]) == 7
 

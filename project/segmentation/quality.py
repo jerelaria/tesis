@@ -23,8 +23,6 @@ class MaskSelectionConfig:
     """Configuration for prototype selection and reference mask scoring."""
     sam_score_weight: float = 0.5     # alpha: weight for SAM confidence
     min_combined_score: float = 0.75  # minimum score to qualify as a prototype
-    num_reference_frames: int = 5     # retained for API compatibility; not used
-                                      # by select_prototypes (governed by k)
 
 
 @dataclass
@@ -164,7 +162,6 @@ def select_prototypes(
         Maximum number of prototype masks per cluster.
     config : MaskSelectionConfig
         Provides sam_score_weight (alpha) and min_combined_score.
-        num_reference_frames is NOT used here; k governs the limit.
 
     Returns
     -------

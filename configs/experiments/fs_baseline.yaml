@@ -1,0 +1,20 @@
+# ============================================================================
+# Few-shot baseline: raw MedSAM2 video output, no post-processing.
+# Ablation anchor for the few-shot axis. No clustering, no propagation.
+# K (number of reference images) is passed at runtime via --num-refs.
+# ============================================================================
+experiment:
+  name: fs_baseline
+  description: "Few-shot — raw MedSAM2 video output (no post-processing)"
+
+mode: few_shot
+
+dataset:
+  extensions: ["png"]
+
+segmenter:
+  model: medsam2
+  device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50

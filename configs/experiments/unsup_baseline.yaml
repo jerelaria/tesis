@@ -3,7 +3,8 @@
 # Ablation anchor for the unsupervised axis. Evaluated with hungarian
 # matching: the matcher assigns each GT organ to the predicted mask with
 # highest IoU, regardless of the synthetic obj_XXX names.
-# Compare vs unsup_kmeans, unsup_kmeans_refine, unsup_hdbscan, unsup_hdbscan_refine.
+# Compare vs unsup_hdbscan, unsup_hdbscan_propagation.
+# Pipeline terminates after phase1 (no clustering, no propagation).
 # ============================================================================
 experiment:
   name: unsup_baseline

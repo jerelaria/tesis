@@ -338,12 +338,14 @@ class ClusteringDebugWriter:
             )
             freq_by_cluster[cid] = round(imgs_with_cid / total_images, 4) if total_images else 0.0
 
-        # Propagated masks per cluster
-        propagated_per_cluster: dict[int, int] = {cid: 0 for cid in good_clusters}
+        # Propagated masks per cluster (keyed by organ_name, e.g. "cluster_0")
+        propagated_per_cluster: dict[str, int] = {
+            f"cluster_{cid}": 0 for cid in good_clusters
+        }
         for objs in labeled_by_image_propagated.values():
             for obj in objs:
-                if obj.organ_id in propagated_per_cluster:
-                    propagated_per_cluster[obj.organ_id] += 1
+                if obj.organ_name in propagated_per_cluster:
+                    propagated_per_cluster[obj.organ_name] += 1
 
         # Prototype metadata
         proto_info: dict[str, list] = {}
@@ -374,7 +376,8 @@ class ClusteringDebugWriter:
             "cluster_to_obj_id": {str(k_): v for k_, v in cluster_to_obj_id.items()},
             "image_frequency": {f"cluster_{c}": freq_by_cluster[c] for c in sorted(good_clusters)},
             "propagated_masks_per_cluster": {
-                f"cluster_{c}": propagated_per_cluster[c] for c in sorted(good_clusters)
+                f"cluster_{c}": propagated_per_cluster[f"cluster_{c}"]
+                for c in sorted(good_clusters)
             },
             "prototypes": proto_info,
         }

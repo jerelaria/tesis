@@ -48,7 +48,8 @@ def resolve_segmentation(
     Owns: payload/fingerprint construction, hit/miss/compute/raise decision,
     and the single compute-and-write block (captured in compute_fn).
     """
-    if args.no_seg_cache:
+    if args.no_seg_cache or mode == "few_shot":
+        # few_shot skips Phase 1 entirely; no dataset segmentation cache needed.
         return SegmentationResolution(
             preloaded=None,
             seg_fingerprint=None,

@@ -244,7 +244,7 @@ def save_memory_composition_figure(
 
     entries = []
     for entry in memory_composition:
-        cid = entry["cluster_id"]
+        label = entry.get("label", str(entry.get("obj_id", "?")))
         obj_id = entry["obj_id"]
         frame_idx = entry["frame_idx"]
         source_path = entry.get("source_path", "")
@@ -262,11 +262,11 @@ def save_memory_composition_figure(
 
         src_name = Path(source_path).name if source_path else "?"
         title = (
-            f"frame={frame_idx}  obj_id={obj_id}  cid={cid}\n"
+            f"frame={frame_idx}  obj_id={obj_id}  label={label}\n"
             f"{src_name}\n"
             f"area={area}  score={score:.3f}"
         )
-        entries.append((img, mask, cid, title))
+        entries.append((img, mask, obj_id, title))
 
     n_frames = len(entries)
     suptitle = (

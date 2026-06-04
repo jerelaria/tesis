@@ -1,0 +1,24 @@
+# ============================================================================
+# Few-shot — iterative prototype propagation.
+# Identical to fs_propagation except propagation.mode: iterative.
+# Human-annotated reference masks are propagated iteratively to all images.
+# K (number of reference images) is passed at runtime via --num-refs.
+# ============================================================================
+experiment:
+  name: fs_propagation_iter
+  description: "Few-shot — human references propagated iteratively"
+
+mode: few_shot
+
+dataset:
+  extensions: ["png"]
+
+segmenter:
+  model: medsam2
+  device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50
+
+propagation:
+  mode: iterative

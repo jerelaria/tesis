@@ -1,0 +1,25 @@
+# ============================================================================
+# Few-shot — prototype propagation
+#
+# Human-annotated reference masks are propagated to all dataset images.
+# K (number of reference images) is passed at runtime via --num-refs.
+# No clustering: label identity comes directly from the annotator.
+# ============================================================================
+experiment:
+  name: fs_propagation
+  description: "Few-shot — human references propagated independently"
+
+mode: few_shot
+
+dataset:
+  extensions: ["png"]
+
+segmenter:
+  model: medsam2
+  device: cuda
+  grid_side: 6
+  score_threshold: 0.50
+  iou_threshold: 0.50
+
+propagation:
+  mode: independent

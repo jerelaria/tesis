@@ -10,12 +10,12 @@ from project.feature_extraction.moments import MomentFeatureExtractor
 from project.labeling.clustering import ClusteringLabeler, ClusteringConfig
 from project.segmentation.medsam2 import MedSAM2Segmenter, MedSAM2Config
 from project.pipeline.phase1_unsupervised import run_phase1_unsupervised
-from project.pipeline.phase1_few_shot import (
-    run_phase1_few_shot_independent,
-    run_phase1_few_shot_iterative,
-)
 from project.pipeline.persistence import save_predicted_masks, print_summary
 from project.pipeline.propagator import PropagationConfig, PrototypePropagator
+from project.pipeline.reference_builder import (
+    build_fewshot_references,
+    build_unsupervised_references,
+)
 from project.pipeline.phase2_debug import ClusteringDebugWriter
 
 logger = logging.getLogger(__name__)
@@ -25,10 +25,9 @@ class Pipeline:
     """
     Linear co-segmentation pipeline:
 
-      Phase 1 — Segmentation + Feature Extraction
-      Phase 2 — Clustering
-      Phase 3 — Semantic Cluster Mapping  (few-shot only)
-      Phase 4 — Prototype Propagation
+      Unsupervised: Phase 1 Segmentation+Features → Phase 2 Clustering
+                    → Phase 3 Reference Selection → Phase 4 Propagation
+      Few-shot:     Phase 4 Propagation only (references provided by caller)
     """
 
     def __init__(
@@ -41,7 +40,6 @@ class Pipeline:
         propagator: PrototypePropagator | None,
         results_dir: Path,
         extract_embeddings: bool = False,
-        propagation_mode: str = "independent",
     ):
         self.mode = mode
         self.reader = reader
@@ -51,7 +49,6 @@ class Pipeline:
         self.propagator = propagator
         self.results_dir = results_dir
         self.extract_embeddings = extract_embeddings
-        self.propagation_mode = propagation_mode
         self.debug_writer: ClusteringDebugWriter | None = None
 
     def run(
@@ -60,6 +57,9 @@ class Pipeline:
         references=None,
         preloaded: tuple | None = None,
     ) -> dict[Path, list[LabeledObject]]:
+        if self.mode == "few_shot":
+            return self._run_few_shot(image_paths, references)
+
         if preloaded is not None:
             all_objects, objects_by_image = preloaded
             logger.info(
@@ -67,16 +67,13 @@ class Pipeline:
                 f"from {len(objects_by_image)} images"
             )
         else:
-            all_objects, objects_by_image = self.phase1(image_paths, references)
+            all_objects, objects_by_image = self.phase1(image_paths)
         logger.info(f"Total objects: {len(all_objects)}")
 
         if self.labeler is None:
             return self._baseline_label(all_objects, objects_by_image, references)
 
         labeled_by_image_clustering = self.phase2(all_objects, objects_by_image)
-
-        if self.mode == "few_shot":
-            labeled_by_image_clustering = self.phase3(labeled_by_image_clustering)
 
         labeled_by_image, memory = self.phase4_propagate(
             labeled_by_image_clustering, list(objects_by_image.keys())
@@ -98,10 +95,46 @@ class Pipeline:
         return labeled_by_image
 
     # ------------------------------------------------------------------
+    # Few-shot direct propagation (no Phase 1/2/3)
+    # ------------------------------------------------------------------
+
+    def _run_few_shot(
+        self,
+        image_paths,
+        references: list,
+    ) -> dict[Path, list[LabeledObject]]:
+        """Propagate human references directly — no segmentation or clustering."""
+        logger.info("=" * 60)
+        logger.info("Phase 4: Prototype Propagation (few-shot)")
+        logger.info("=" * 60)
+
+        phase4_dir = self.results_dir / "phase4_propagation"
+        phase4_dir.mkdir(exist_ok=True)
+
+        refs, frame_scores = build_fewshot_references(references or [])
+        if not refs:
+            logger.warning("No references; returning empty result.")
+            return {p: [] for p in image_paths}
+
+        labeled_by_image, _ = self.propagator.propagate(
+            references=refs,
+            frame_scores=frame_scores,
+            target_paths=list(image_paths),
+            reader=self.reader,
+        )
+
+        for path, labeled in labeled_by_image.items():
+            save_visualization(path, labeled, phase4_dir, suffix="_propagated")
+
+        save_predicted_masks(labeled_by_image, self.results_dir)
+        print_summary([], labeled_by_image)
+        return labeled_by_image
+
+    # ------------------------------------------------------------------
     # Phases
     # ------------------------------------------------------------------
 
-    def phase1(self, image_paths, references, force_embeddings: bool = False):
+    def phase1(self, image_paths, force_embeddings: bool = False):
         logger.info("=" * 60)
         logger.info("Phase 1: Segmentation + Feature Extraction")
         logger.info("=" * 60)
@@ -117,19 +150,9 @@ class Pipeline:
 
         extract_embeddings = self.extract_embeddings or force_embeddings
 
-        if self.mode == "unsupervised":
-            return run_phase1_unsupervised(
-                image_paths, self.reader, self.segmenter, self.extractor,
-                phase1_dir, extract_embeddings=extract_embeddings,
-            )
-        if self.propagation_mode == "independent":
-            return run_phase1_few_shot_independent(
-                image_paths, self.reader, self.segmenter, self.extractor,
-                references, phase1_dir, extract_embeddings=extract_embeddings,
-            )
-        return run_phase1_few_shot_iterative(
+        return run_phase1_unsupervised(
             image_paths, self.reader, self.segmenter, self.extractor,
-            references, phase1_dir, extract_embeddings=extract_embeddings,
+            phase1_dir, extract_embeddings=extract_embeddings,
         )
 
     def phase2(self, all_objects, objects_by_image):
@@ -151,23 +174,6 @@ class Pipeline:
 
         return labeled_by_image
 
-    def phase3(self, labeled_by_image):
-        logger.info("=" * 60)
-        logger.info("Phase 3: Semantic Cluster Mapping")
-        logger.info("=" * 60)
-
-        from project.labeling.semantic_mapper import ClusterSemanticMapper
-
-        phase3_dir = self.results_dir / "phase3_semantic"
-        phase3_dir.mkdir(exist_ok=True)
-
-        labeled_by_image = ClusterSemanticMapper().map(labeled_by_image)
-
-        for path, labeled in labeled_by_image.items():
-            save_visualization(path, labeled, phase3_dir, suffix="_semantic")
-
-        return labeled_by_image
-
     def phase4_propagate(
         self,
         labeled_by_image: dict[Path, list[LabeledObject]],
@@ -180,8 +186,12 @@ class Pipeline:
         phase4_dir = self.results_dir / "phase4_propagation"
         phase4_dir.mkdir(exist_ok=True)
 
+        references, frame_scores = build_unsupervised_references(
+            labeled_by_image, self.propagator.config, self.reader
+        )
         labeled_by_image, memory = self.propagator.propagate(
-            labeled_by_image=labeled_by_image,
+            references=references,
+            frame_scores=frame_scores,
             target_paths=target_paths,
             reader=self.reader,
         )
@@ -265,27 +275,16 @@ def build_pipeline_from_config(
         segmenter = None
         logger.info("Segmenter not loaded (using cached segmentation, baseline mode)")
 
-    clustering_enabled = True
+    # Clustering only applies to unsupervised mode; few_shot always propagates directly.
     if mode == "few_shot":
-        clustering_enabled = cfg.get("few_shot", {}).get("clustering_enabled", True)
+        clustering_enabled = False
     elif mode == "unsupervised":
         clustering_enabled = cfg.get("unsupervised", {}).get("clustering_enabled", True)
+    else:
+        clustering_enabled = True
 
     labeler = None
     if clustering_enabled:
-        if mode == "few_shot" and references:
-            organ_names = set()
-            for ref in references:
-                organ_names.update(ref.masks.keys())
-            n_clusters = len(organ_names)
-            cfg.setdefault("labeler", {})
-            cfg["labeler"].setdefault("kmeans", {})
-            cfg["labeler"]["kmeans"]["n_clusters"] = n_clusters
-            logger.info(
-                f"Inferred n_clusters={n_clusters} from references: "
-                f"{sorted(organ_names)}"
-            )
-
         labeler = ClusteringLabeler(ClusteringConfig(**cfg["labeler"]))
         labeler.resolve_adaptive_params(num_images)
 
@@ -294,7 +293,7 @@ def build_pipeline_from_config(
             logger.info("Moment features: NONE (embeddings-only mode)")
         else:
             logger.info(f"Moment features: {len(labeler.config.features)} selected")
-    else:
+    elif mode != "few_shot":
         logger.info("[BASELINE] clustering_enabled=false -> "
                     "skipping phases 2-4, using MedSAM2 labels directly")
 
@@ -304,40 +303,43 @@ def build_pipeline_from_config(
     if extract_embeddings:
         logger.info("Embedding extraction: ENABLED")
 
-    propagation_mode = "independent"
-    if mode == "few_shot":
-        propagation_mode = cfg.get("few_shot", {}).get(
-            "propagation_mode", "independent"
-        )
-        logger.info(f"Propagation mode: {propagation_mode}")
+    propagation_mode = cfg.get("propagation", {}).get("mode", "independent")
+    logger.info(f"Propagation mode: {propagation_mode}")
 
     propagator = None
     debug_writer = None
-    if clustering_enabled:
+    if clustering_enabled or mode == "few_shot":
         if segmenter is None:
             raise RuntimeError(
                 "Segmenter required for propagation but not loaded. "
                 "This is a configuration error: need_segmenter must be True "
-                "when clustering is enabled."
+                "when propagation is enabled."
             )
-        propagation_cfg = cfg.get("propagation", {})
+        propagation_cfg = dict(cfg.get("propagation", {}))
+        if mode == "few_shot" and "mode" not in propagation_cfg:
+            # few_shot configs express propagation mode under few_shot.propagation_mode
+            propagation_cfg["mode"] = (
+                cfg.get("few_shot", {}).get("propagation_mode", "independent")
+            )
         propagator = PrototypePropagator(
             segmenter=segmenter,
             config=PropagationConfig(**propagation_cfg),
         )
         logger.info(
             f"Propagator: references_per_cluster="
-            f"{propagator.config.references_per_cluster}"
+            f"{propagator.config.references_per_cluster}, "
+            f"mode={propagator.config.mode}"
         )
 
-        debug_cfg = cfg.get("debug", {})
-        n_preview = debug_cfg.get("n_preview", 10)
-        seed = debug_cfg.get("seed", 42)
-        debug_writer = ClusteringDebugWriter(
-            phase2_dir=results_dir / "phase2_clustering",
-            n_preview=n_preview,
-            seed=seed,
-        )
+        if clustering_enabled:
+            debug_cfg = cfg.get("debug", {})
+            n_preview = debug_cfg.get("n_preview", 10)
+            seed = debug_cfg.get("seed", 42)
+            debug_writer = ClusteringDebugWriter(
+                phase2_dir=results_dir / "phase2_clustering",
+                n_preview=n_preview,
+                seed=seed,
+            )
 
     pipeline = Pipeline(
         mode=mode,
@@ -348,7 +350,6 @@ def build_pipeline_from_config(
         propagator=propagator,
         results_dir=results_dir,
         extract_embeddings=extract_embeddings,
-        propagation_mode=propagation_mode,
     )
     pipeline.debug_writer = debug_writer
     return pipeline
