@@ -2,17 +2,17 @@
 Tests for PrototypePropagator and build_unsupervised_references.
 
 GPU is NOT used.  A StubVideoSegmenter replaces MedSAM2Segmenter; it captures
-every call to segment_with_video_prompts and returns synthetic SegmentedObjects
-(one per label per target image).
+every call to segment_with_multi_reference and returns synthetic SegmentedObjects.
 
 Conventions verified:
-  - Reference frames are mono-organ (exactly one mask key each).
-  - Frame ordering is interleaved by prototype index, then sorted cluster_id.
-  - segment_with_video_prompts is called exactly once per target image.
+  - segment_with_multi_reference is called n_good_clusters × n_targets times.
+  - Each call carries the correct organ_name (f"cluster_{cid}") and correct
+    number of reference entries (min(k, n_prototypes_available)).
   - organ_id = sorted_position(label) + 1  (SAM2 rejects obj_id=0).
   - Output has one LabeledObject per cluster per target; method_used="propagation".
   - Clusters failing quality thresholds are absent from the result.
   - Memory composition exposes the required fields.
+  - Third return element (debug_predictions) is [] when the flag is False.
 """
 import numpy as np
 import pytest
@@ -35,15 +35,52 @@ H, W = 20, 20
 # ---------------------------------------------------------------------------
 
 class StubVideoSegmenter:
-    """Captures every call to segment_with_video_prompts and returns one
-    SegmentedObject per label (organ_name) for the given target image."""
+    """Captures calls to segment_with_multi_reference and
+    segment_batch_iterative_per_cluster; returns synthetic SegmentedObjects."""
 
     def __init__(self):
+        self.multi_ref_call_count = 0
+        self.multi_ref_calls: list[tuple[MedicalImage, str, int]] = []
+        self.batch_per_cluster_call_count = 0
+        self.batch_per_cluster_calls: list[tuple[str, int, int]] = []
+        # kept so tests can verify it is never called
         self.call_count = 0
-        self.last_references = None
-        self.calls: list[tuple[MedicalImage, list]] = []
         self.batch_iterative_call_count = 0
-        self.batch_iterative_calls: list[tuple[list, list]] = []
+
+    def segment_with_multi_reference(
+        self,
+        target_image: MedicalImage,
+        reference_entries: list,
+        organ_name: str,
+    ) -> SegmentedObject:
+        self.multi_ref_call_count += 1
+        self.multi_ref_calls.append((target_image, organ_name, len(reference_entries)))
+        return SegmentedObject(
+            mask=np.ones((H, W), dtype=bool),
+            source_image=target_image,
+            confidence=0.8,
+            label=organ_name,
+        )
+
+    def segment_batch_iterative_per_cluster(
+        self,
+        target_entries: list,
+        reference_entries: list,
+        organ_name: str,
+    ) -> dict:
+        self.batch_per_cluster_call_count += 1
+        self.batch_per_cluster_calls.append(
+            (organ_name, len(reference_entries), len(target_entries))
+        )
+        return {
+            path: SegmentedObject(
+                mask=np.ones((H, W), dtype=bool),
+                source_image=source_image,
+                confidence=0.8,
+                label=organ_name,
+            )
+            for path, source_image in target_entries
+        }
 
     def segment_with_video_prompts(
         self,
@@ -51,26 +88,7 @@ class StubVideoSegmenter:
         references: list,
     ) -> list[SegmentedObject]:
         self.call_count += 1
-        self.last_references = list(references)
-        self.calls.append((target_image, list(references)))
-
-        # Collect unique labels in first-appearance order (mirrors
-        # register_multi_frame_masks logic used in the real segmenter).
-        seen: list[str] = []
-        for ref in references:
-            for name in ref.masks:
-                if name not in seen:
-                    seen.append(name)
-
-        return [
-            SegmentedObject(
-                mask=np.ones((H, W), dtype=bool),
-                source_image=target_image,
-                confidence=0.8,
-                label=organ_name,
-            )
-            for organ_name in seen
-        ]
+        return []
 
     def segment_batch_iterative(
         self,
@@ -78,27 +96,7 @@ class StubVideoSegmenter:
         references: list,
     ) -> dict:
         self.batch_iterative_call_count += 1
-        self.last_references = list(references)
-        self.batch_iterative_calls.append((list(target_entries), list(references)))
-
-        seen: list[str] = []
-        for ref in references:
-            for name in ref.masks:
-                if name not in seen:
-                    seen.append(name)
-
-        return {
-            path: [
-                SegmentedObject(
-                    mask=np.ones((H, W), dtype=bool),
-                    source_image=source_image,
-                    confidence=0.8,
-                    label=organ_name,
-                )
-                for organ_name in seen
-            ]
-            for path, source_image in target_entries
-        }
+        return {}
 
 
 class StubReader:
@@ -183,7 +181,7 @@ def _build_and_propagate(
     stub: StubVideoSegmenter,
     reader: StubReader | None = None,
 ):
-    """Call build_unsupervised_references then propagate."""
+    """Call build_unsupervised_references then propagate. Returns 3 elements."""
     reader = reader or StubReader()
     propagator = PrototypePropagator(segmenter=stub, config=config)
     refs, scores = build_unsupervised_references(labeled_by_image, config, reader)
@@ -191,26 +189,42 @@ def _build_and_propagate(
 
 
 # ---------------------------------------------------------------------------
-# Reference frame structure
+# Per-cluster session discipline
 # ---------------------------------------------------------------------------
 
-class TestReferenceFrames:
+class TestPerClusterSessions:
 
-    def _run(self, cluster_ids, k, n_images=10):
+    def _run(self, cluster_ids, k, n_images=10, n_targets=3):
         labeled_by_image = _build_dataset(n_images, cluster_ids)
         stub = StubVideoSegmenter()
         config = _permissive_config(k=k)
-        target_paths = [Path(f"/tmp/tgt_{i}.png") for i in range(3)]
+        target_paths = [Path(f"/tmp/tgt_{i}.png") for i in range(n_targets)]
         _build_and_propagate(labeled_by_image, config, target_paths, stub)
         return stub
 
-    def test_frame_count_equals_k_times_n_clusters(self):
-        """K=2 prototypes × 3 clusters → 6 reference frames."""
-        stub = self._run(cluster_ids=[0, 1, 2], k=2)
-        assert len(stub.last_references) == 6
+    def test_call_count_equals_clusters_times_targets(self):
+        """segment_with_multi_reference called n_clusters × n_targets times."""
+        n_clusters, n_targets = 3, 4
+        stub = self._run(cluster_ids=[0, 1, 2], k=2, n_targets=n_targets)
+        assert stub.multi_ref_call_count == n_clusters * n_targets
 
-    def test_fewer_frames_when_prototypes_unavailable(self):
-        """If cluster_1 has only 1 qualifying prototype, K=3 yields 3+1+3=7 not 9."""
+    def test_organ_names_are_correct(self):
+        """Each call must carry the cluster's own organ_name."""
+        stub = self._run(cluster_ids=[0, 1, 2], k=2, n_targets=2)
+        called_organs = {organ for _, organ, _ in stub.multi_ref_calls}
+        assert called_organs == {"cluster_0", "cluster_1", "cluster_2"}
+
+    def test_reference_entries_count_respects_k(self):
+        """len(reference_entries) == min(k, n_prototypes_available) per cluster."""
+        k = 3
+        stub = self._run(cluster_ids=[0, 1], k=k, n_images=10, n_targets=1)
+        for _, organ_name, n_entries in stub.multi_ref_calls:
+            assert n_entries == k, (
+                f"{organ_name}: expected {k} entries, got {n_entries}"
+            )
+
+    def test_fewer_entries_when_prototypes_unavailable(self):
+        """A cluster with only 1 prototype gets 1 entry even when k=3."""
         labeled_by_image = _build_dataset(n_images=10, cluster_ids=[0, 2])
         path_0 = Path("/tmp/img_0.png")
         labeled_by_image[path_0].append(
@@ -221,57 +235,39 @@ class TestReferenceFrames:
         _build_and_propagate(
             labeled_by_image, config, [Path("/tmp/tgt_0.png")], stub
         )
-        refs = stub.last_references
-        # cluster_0: 3 protos, cluster_1: 1 proto, cluster_2: 3 protos → 7 frames
-        assert len(refs) == 7
-
-    def test_each_frame_is_mono_organ(self):
-        """Every reference frame must have exactly one mask entry."""
-        stub = self._run(cluster_ids=[0, 1, 2], k=2)
-        for ref in stub.last_references:
-            assert len(ref.masks) == 1, (
-                f"Expected mono-organ frame, got {list(ref.masks.keys())}"
-            )
-
-    def test_interleaved_ordering(self):
-        """
-        Frame order must be interleaved by prototype index:
-        [cid_0 p0, cid_1 p0, cid_2 p0, cid_0 p1, cid_1 p1, cid_2 p1]
-        """
-        stub = self._run(cluster_ids=[0, 1, 2], k=2)
-        n_clusters = 3
-        for frame_idx, ref in enumerate(stub.last_references):
-            organ_name = next(iter(ref.masks))
-            expected_cluster = sorted([0, 1, 2])[frame_idx % n_clusters]
-            assert organ_name == f"cluster_{expected_cluster}", (
-                f"Frame {frame_idx}: expected cluster_{expected_cluster}, "
-                f"got {organ_name}"
-            )
+        # cluster_1 had only 1 prototype
+        entries_by_organ = {
+            organ: n_entries for _, organ, n_entries in stub.multi_ref_calls
+        }
+        assert entries_by_organ["cluster_1"] == 1
+        assert entries_by_organ["cluster_0"] == 3
+        assert entries_by_organ["cluster_2"] == 3
 
 
 # ---------------------------------------------------------------------------
 # Batch call discipline
 # ---------------------------------------------------------------------------
 
-def test_segment_called_once_per_target():
-    """segment_with_video_prompts must be called exactly once per target image."""
+def test_segment_called_n_clusters_times_per_target():
+    """segment_with_multi_reference is called n_clusters × n_targets times total."""
     n_targets = 20
+    n_clusters = 3
     labeled_by_image = _build_dataset(n_images=10, cluster_ids=[0, 1, 2])
     stub = StubVideoSegmenter()
     config = _permissive_config(k=3)
     target_paths = [Path(f"/tmp/tgt_{i}.png") for i in range(n_targets)]
     _build_and_propagate(labeled_by_image, config, target_paths, stub)
-    assert stub.call_count == n_targets
+    assert stub.multi_ref_call_count == n_clusters * n_targets
 
 
 def test_all_target_paths_sent_to_segmenter():
-    """Every target_path must reach segment_with_video_prompts."""
+    """Every target_path must reach segment_with_multi_reference."""
     labeled_by_image = _build_dataset(n_images=10, cluster_ids=[0])
     stub = StubVideoSegmenter()
     config = _permissive_config(k=1)
     target_paths = [Path(f"/tmp/tgt_{i}.png") for i in range(7)]
     _build_and_propagate(labeled_by_image, config, target_paths, stub)
-    sent_paths = {Path(img.source_path) for img, _ in stub.calls}
+    sent_paths = {Path(img.source_path) for img, _, _ in stub.multi_ref_calls}
     assert sent_paths == set(target_paths)
 
 
@@ -290,7 +286,7 @@ def test_obj_id_sorted_position_plus_one():
         labeled_by_image = _build_dataset(n_images=10, cluster_ids=cluster_ids)
         stub = StubVideoSegmenter()
         config = _permissive_config(k=1)
-        _, memory = _build_and_propagate(
+        _, memory, _ = _build_and_propagate(
             labeled_by_image, config, [Path("/tmp/t.png")], stub
         )
         sorted_labels = sorted(f"cluster_{cid}" for cid in cluster_ids)
@@ -313,7 +309,7 @@ class TestOutputStructure:
         stub = StubVideoSegmenter()
         config = _permissive_config(k=k)
         target_paths = [Path(f"/tmp/tgt_{i}.png") for i in range(n_targets)]
-        result, memory = _build_and_propagate(
+        result, memory, _ = _build_and_propagate(
             labeled_by_image, config, target_paths, stub
         )
         return result, memory, stub
@@ -363,8 +359,6 @@ class TestOutputStructure:
 
 def test_bad_cluster_excluded_from_result():
     """Cluster failing min_image_frequency must not appear in the output."""
-    # cluster_0: all 10 images (good)
-    # cluster_1: only 2/10 images (bad, below 0.5 threshold)
     labeled_by_image = _build_dataset(n_images=10, cluster_ids=[0])
     for i in range(2):
         path = Path(f"/tmp/img_{i}.png")
@@ -384,7 +378,7 @@ def test_bad_cluster_excluded_from_result():
             sam_score_weight=0.5, min_combined_score=0.0
         ),
     )
-    result, _ = _build_and_propagate(
+    result, _, _ = _build_and_propagate(
         labeled_by_image, config, [Path("/tmp/t.png")], stub
     )
     for labeled in result.values():
@@ -397,7 +391,6 @@ def test_bad_cluster_excluded_from_result():
 
 def test_no_good_clusters_returns_empty():
     """When no cluster passes quality thresholds, result must be all-empty."""
-    # sam_confidence=0.3 but min_avg_sam_confidence=0.9 → cluster_0 fails
     labeled_by_image = _build_dataset(
         n_images=5, cluster_ids=[0], sam_confidence=0.3
     )
@@ -417,10 +410,11 @@ def test_no_good_clusters_returns_empty():
 
     propagator = PrototypePropagator(segmenter=stub, config=config)
     target_paths = [Path(f"/tmp/t_{i}.png") for i in range(3)]
-    result, memory = propagator.propagate(refs, scores, target_paths, reader)
-    assert stub.call_count == 0, "segmenter must not be called when no references"
+    result, memory, debug = propagator.propagate(refs, scores, target_paths, reader)
+    assert stub.multi_ref_call_count == 0, "segmenter must not be called when no references"
     assert all(v == [] for v in result.values())
     assert memory == []
+    assert debug == []
 
 
 # ---------------------------------------------------------------------------
@@ -433,7 +427,7 @@ class TestMemoryComposition:
         labeled_by_image = _build_dataset(n_images=10, cluster_ids=cluster_ids)
         stub = StubVideoSegmenter()
         config = _permissive_config(k=k)
-        _, memory = _build_and_propagate(
+        _, memory, _ = _build_and_propagate(
             labeled_by_image, config, [Path("/tmp/t.png")], stub
         )
         return memory
@@ -447,9 +441,16 @@ class TestMemoryComposition:
             assert required.issubset(entry.keys())
 
     def test_frame_idx_sequential_from_zero(self):
+        """frame_idx restarts at 0 for each cluster and is sequential within it."""
+        from collections import defaultdict
         memory = self._memory([0, 1], k=3)
-        for i, entry in enumerate(memory):
-            assert entry["frame_idx"] == i
+        by_label: dict[str, list[int]] = defaultdict(list)
+        for entry in memory:
+            by_label[entry["label"]].append(entry["frame_idx"])
+        for label, idxs in by_label.items():
+            assert idxs == list(range(len(idxs))), (
+                f"{label}: expected frame_idx 0..{len(idxs)-1}, got {idxs}"
+            )
 
     def test_mask_is_ndarray(self):
         for entry in self._memory([0, 1]):
@@ -464,24 +465,43 @@ class TestMemoryComposition:
             assert isinstance(entry["combined_score"], float)
 
     def test_length_equals_reference_frame_count(self):
-        """len(memory) must equal the number of reference frames built."""
-        stub = StubVideoSegmenter()
+        """len(memory) == total prototypes used (sum of min(k, n_protos) per cluster)."""
+        reader = StubReader()
         labeled_by_image = _build_dataset(n_images=10, cluster_ids=[0, 1, 2])
         config = _permissive_config(k=2)
-        _, memory = _build_and_propagate(
-            labeled_by_image, config, [Path("/tmp/t.png")], stub
-        )
-        assert len(memory) == len(stub.last_references)
+        stub = StubVideoSegmenter()
+        refs, scores = build_unsupervised_references(labeled_by_image, config, reader)
+        propagator = PrototypePropagator(segmenter=stub, config=config)
+        _, memory, _ = propagator.propagate(refs, scores, [Path("/tmp/t.png")], reader)
+        # mono-organ references: one memory entry per reference frame
+        assert len(memory) == len(refs)
+
+
+# ---------------------------------------------------------------------------
+# Debug flag
+# ---------------------------------------------------------------------------
+
+def test_debug_flag_returns_empty_debug_when_false():
+    """Third return element must be [] when debug_collect_reference_predictions=False."""
+    labeled_by_image = _build_dataset(n_images=5, cluster_ids=[0, 1])
+    stub = StubVideoSegmenter()
+    config = _permissive_config(k=2)
+    assert not config.debug_collect_reference_predictions
+    _, _, debug = _build_and_propagate(
+        labeled_by_image, config, [Path("/tmp/t.png")], stub
+    )
+    assert debug == []
 
 
 # ---------------------------------------------------------------------------
 # Iterative mode
 # ---------------------------------------------------------------------------
 
-def test_iterative_mode_calls_segment_batch_iterative_once():
-    """mode='iterative' must call segment_batch_iterative exactly once, not
-    segment_with_video_prompts, and produce the same output structure."""
+def test_iterative_mode_calls_per_cluster_batch_once_per_cluster():
+    """mode='iterative' calls segment_batch_iterative_per_cluster once per
+    cluster, not segment_with_multi_reference, and produces the same output."""
     n_targets = 5
+    n_clusters = 2
     labeled_by_image = _build_dataset(n_images=10, cluster_ids=[0, 1])
     stub = StubVideoSegmenter()
     config = PropagationConfig(
@@ -498,14 +518,22 @@ def test_iterative_mode_calls_segment_batch_iterative_once():
         mode="iterative",
     )
     target_paths = [Path(f"/tmp/tgt_{i}.png") for i in range(n_targets)]
-    result, _ = _build_and_propagate(labeled_by_image, config, target_paths, stub)
+    result, _, _ = _build_and_propagate(labeled_by_image, config, target_paths, stub)
 
-    assert stub.batch_iterative_call_count == 1, (
-        "segment_batch_iterative must be called exactly once in iterative mode"
+    assert stub.batch_per_cluster_call_count == n_clusters, (
+        "segment_batch_iterative_per_cluster must be called once per cluster"
     )
-    assert stub.call_count == 0, (
-        "segment_with_video_prompts must not be called in iterative mode"
+    assert stub.multi_ref_call_count == 0, (
+        "segment_with_multi_reference must not be called in iterative mode"
     )
+    assert stub.batch_iterative_call_count == 0, (
+        "segment_batch_iterative (old shared method) must not be called"
+    )
+    # Each per-cluster call spans all N targets
+    for organ_name, n_refs, n_tgts in stub.batch_per_cluster_calls:
+        assert n_tgts == n_targets, (
+            f"{organ_name}: expected {n_targets} targets per session, got {n_tgts}"
+        )
     assert set(result.keys()) == set(target_paths)
     expected_names = {"cluster_0", "cluster_1"}
     for path, labeled in result.items():
@@ -546,7 +574,7 @@ class TestFewShotPropagation:
         )
         propagator = PrototypePropagator(segmenter=stub, config=config)
         target_paths = [Path(f"/tmp/tgt_{i}.png") for i in range(n_targets)]
-        result, _ = propagator.propagate(fewshot_refs, scores, target_paths, StubReader())
+        result, _, _ = propagator.propagate(fewshot_refs, scores, target_paths, StubReader())
         return result, stub
 
     def test_output_inherits_organ_names(self):
@@ -581,14 +609,19 @@ class TestFewShotPropagation:
                 assert obj.method_used == "propagation"
 
     def test_respects_iterative_propagation_mode(self):
-        """few_shot propagation must call segment_batch_iterative when mode='iterative'."""
-        result, stub = self._propagate(["liver", "spleen"], n_targets=4,
+        """few_shot propagation must call segment_batch_iterative_per_cluster
+        once per organ when mode='iterative'."""
+        organ_names = ["liver", "spleen"]
+        result, stub = self._propagate(organ_names, n_targets=4,
                                        propagation_mode="iterative")
-        assert stub.batch_iterative_call_count == 1, (
-            "segment_batch_iterative must be called once in iterative mode"
+        assert stub.batch_per_cluster_call_count == len(organ_names), (
+            "segment_batch_iterative_per_cluster must be called once per organ"
         )
-        assert stub.call_count == 0, (
-            "segment_with_video_prompts must not be called in iterative mode"
+        assert stub.multi_ref_call_count == 0, (
+            "segment_with_multi_reference must not be called in iterative mode"
+        )
+        assert stub.batch_iterative_call_count == 0, (
+            "old shared segment_batch_iterative must not be called"
         )
         for labeled in result.values():
             names = {obj.organ_name for obj in labeled}
@@ -617,7 +650,7 @@ class TestFewShotPropagation:
             mask_selection=MaskSelectionConfig(min_combined_score=0.0),
         )
         propagator = PrototypePropagator(segmenter=stub, config=config)
-        result, _ = propagator.propagate(
+        result, _, _ = propagator.propagate(
             fewshot_refs, scores, [Path("/tmp/t.png")], StubReader()
         )
         for labeled in result.values():

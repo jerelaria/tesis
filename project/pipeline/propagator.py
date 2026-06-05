@@ -4,19 +4,18 @@ Prototype-based propagation stage (Phase 4).
 Two operating modes, selected via PropagationConfig.mode:
 
   independent (default)
-      One (K+1)-frame video session per target image: K reference frames +
-      1 target.  No temporal state is shared between images, so processing
-      order does not affect results.
+      One single-object video session per (cluster, target) pair.
+      K reference frames conditioned on that cluster + 1 target frame.
+      No temporal state is shared between sessions.
 
   iterative
-      A single (K+N)-frame video session: K references followed by N targets.
-      Memory accumulates from references AND previously segmented targets.
+      One single-object video session per cluster, spanning all targets.
+      K reference frames conditioned on that cluster + N target frames.
+      Memory accumulates from each predicted target into the next.
 
-References can be:
-  - Mono-organ frames built from clustering output (unsupervised Phase 3),
-    one mask key per frame, interleaved by prototype index.
-  - Multi-organ frames provided directly by the caller (few-shot), where
-    each frame carries one mask per annotated organ.
+In both modes every cluster gets its own isolated video session, so SAM2's
+memory is never contaminated by reference frames or predictions from other
+clusters.
 
 obj_id assignment
 -----------------
@@ -27,13 +26,13 @@ obj_id = position + 1:
     sorted_labels = sorted(unique_labels)   # e.g. ["cluster_0", "cluster_2"]
     label_to_obj_id = {"cluster_0": 1, "cluster_2": 2}
 
-This mapping is stable across reference frames and is recorded in the
-memory_composition output for traceability.
+This mapping is recorded in the memory_composition output for traceability.
 
-Reference frame ordering
-------------------------
-Frames should be pre-ordered by the caller (e.g. interleaved by prototype
-index).  This propagator accepts any ordering and processes them as-is.
+memory_composition frame_idx
+-----------------------------
+frame_idx in each memory_composition entry is the index of that reference
+frame within its own per-cluster video session (0..K-1).  Entries are
+grouped by label so the per-cluster frame sequence is always contiguous.
 """
 
 import logging
@@ -69,13 +68,20 @@ class PropagationConfig:
         Governs the combined_score formula (sam_score_weight) and the minimum
         score gate (min_combined_score) for prototype selection.
     mode : str
-        "independent" — one video session per target image (default).
-        "iterative"   — single (K+N)-frame video session for all targets.
+        "independent" — one session per (cluster, target) pair (default).
+        "iterative"   — one session per cluster spanning all N targets;
+                        memory accumulates from predicted targets.
+    debug_collect_reference_predictions : bool
+        When True, collect SAM2 predictions on reference frames (not just the
+        target) for each per-cluster video session.  Used to visualize memory
+        contamination.  Has significant runtime overhead; disable in production
+        runs.
     """
     references_per_cluster: int = 5
     quality: ClusterQualityConfig = field(default_factory=ClusterQualityConfig)
     mask_selection: MaskSelectionConfig = field(default_factory=MaskSelectionConfig)
     mode: str = "independent"
+    debug_collect_reference_predictions: bool = False
 
     def __post_init__(self):
         if isinstance(self.quality, dict):
@@ -91,17 +97,18 @@ class PropagationConfig:
 
 class PrototypePropagator(Propagator):
     """
-    Propagates prototype masks to every target image independently.
+    Propagates prototype masks to every target image using per-cluster sessions.
 
-    Each target image is segmented in its own (K+1)-frame video session using
-    only the K reference frames.  No temporal state is shared between images,
-    so processing order does not affect results.
+    Each cluster runs its own isolated video session so SAM2's memory contains
+    only that cluster's reference frames.  In independent mode one session is
+    opened per (cluster, target) pair; in iterative mode one session per
+    cluster spans all N targets, accumulating memory as targets are processed.
 
     Parameters
     ----------
     segmenter : VideoSegmenter
-        Must implement segment_with_video_prompts(target_image, references).
-        MedSAM2Segmenter satisfies this interface.
+        Must implement segment_with_multi_reference and
+        segment_batch_iterative_per_cluster.  MedSAM2Segmenter satisfies this.
     config : PropagationConfig
         Prototype selection and cluster quality thresholds.
     """
@@ -116,33 +123,39 @@ class PrototypePropagator(Propagator):
         frame_scores: list[float],
         target_paths: list[Path],
         reader: ImageReader,
-    ) -> tuple[dict[Path, list[LabeledObject]], list[dict]]:
+    ) -> tuple[dict[Path, list[LabeledObject]], list[dict], list[dict]]:
         """
         Propagate pre-built reference frames to every target image.
 
         Parameters
         ----------
         references
-            Mono-organ FewShotReference frames (one mask key each).
+            FewShotReference frames (mono-organ for unsupervised, may be
+            multi-organ for few-shot).
         frame_scores
             combined_score for each frame in references (parallel list).
         target_paths
             Images to segment.
         reader
-            Used to load target image volumes.
+            Used to load image volumes when ref.volume is None.
 
         Returns
         -------
         result
             {path: [LabeledObject, ...]} for every target path.
         memory_composition
-            Per-frame metadata list for traceability and debug output.
+            Per-cluster, per-frame metadata list.  frame_idx is the index
+            within that cluster's video session (0..K-1).  Entries are grouped
+            by label so each cluster's sequence is contiguous.
+        debug_predictions
+            Per-frame SAM2 predictions on reference frames when
+            debug_collect_reference_predictions is True; empty list otherwise.
         """
         if not references:
             logger.warning("No reference frames; propagation produced no results.")
-            return {path: [] for path in target_paths}, []
+            return {path: [] for path in target_paths}, [], []
 
-        # Collect unique labels in sorted order; assign SAM2-compatible obj_ids
+        # Step 1: collect unique labels in sorted order; assign SAM2-compatible obj_ids
         labels_seen: list[str] = []
         for ref in references:
             for label in ref.masks:
@@ -153,95 +166,195 @@ class PrototypePropagator(Propagator):
             label: i + 1 for i, label in enumerate(unique_labels)
         }
 
-        # Pre-compute per-label centroid across all reference masks for CC filter
+        # Step 2: build cluster_ref_data: label → [(vol, mask, score, source_path)]
+        # One consolidated loop over references; volumes are loaded here if missing.
+        cluster_ref_data: dict[str, list[tuple[np.ndarray, np.ndarray, float, str]]] = {
+            label: [] for label in unique_labels
+        }
+        for ref, score in zip(references, frame_scores):
+            vol = ref.volume
+            if vol is None:
+                vol = reader.load(str(ref.source_path)).volume
+            for label, mask in ref.masks.items():
+                cluster_ref_data[label].append(
+                    (vol, mask, float(score), ref.source_path or "")
+                )
+
+        # Derived views used by the segmenter calls
+        cluster_ref_entries: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {
+            label: [(vol, mask) for vol, mask, _, _ in data]
+            for label, data in cluster_ref_data.items()
+        }
+
+        # Step 3: pre-compute per-label centroid for the CC filter
         _dummy = np.empty(0, dtype=np.float32)
         ref_centroids: dict[str, tuple[float, float]] = {}
         for label in unique_labels:
             mask_pairs = [
-                (_dummy, ref.masks[label])
-                for ref in references
-                if label in ref.masks and ref.masks[label].any()
+                (_dummy, mask)
+                for _, mask, _, _ in cluster_ref_data[label]
+                if mask.any()
             ]
             ref_centroids[label] = (
                 reference_centroid(mask_pairs) if mask_pairs else (0.0, 0.0)
             )
 
-        # Build memory composition log (one entry per reference frame)
+        # Step 4: build memory_composition grouped by label, frame_idx per-cluster
         memory_composition: list[dict] = []
-        for frame_idx, (ref, score) in enumerate(zip(references, frame_scores)):
-            label = next(iter(ref.masks))  # mono-organ: exactly one key
-            mask = ref.masks[label]
-            memory_composition.append({
-                "frame_idx": frame_idx,
-                "obj_id": label_to_obj_id[label],
-                "label": label,
-                "source_path": ref.source_path,
-                "mask": mask,
-                "combined_score": score,
-                "area": int(mask.sum()),
-            })
+        for label in unique_labels:
+            for cluster_frame_idx, (_, mask, score, source_path) in enumerate(
+                cluster_ref_data[label]
+            ):
+                memory_composition.append({
+                    "frame_idx": cluster_frame_idx,
+                    "obj_id": label_to_obj_id[label],
+                    "label": label,
+                    "source_path": source_path,
+                    "mask": mask,
+                    "combined_score": score,
+                    "area": int(mask.sum()),
+                })
 
-        # Load target images
+        # Step 5: load target images
         target_entries: list[tuple[Path, MedicalImage]] = [
             (path, reader.load(str(path))) for path in target_paths
         ]
 
-        result: dict[Path, list[LabeledObject]] = {}
+        result: dict[Path, list[LabeledObject]] = {path: [] for path in target_paths}
+        debug_predictions: list[dict] = []
+
         if self.config.mode == "independent":
             n_targets = len(target_entries)
-            for target_idx, (path, source_image) in enumerate(target_entries):
+            for target_idx, (path, target_image) in enumerate(target_entries):
                 if target_idx % 50 == 0 or target_idx == n_targets - 1:
                     logger.info(
                         f"  Propagating {target_idx + 1}/{n_targets}: {path.name}"
                     )
-                raw_objects = self.segmenter.segment_with_video_prompts(
-                    source_image, references
+                for label in unique_labels:
+                    entries = cluster_ref_entries[label]
+                    if not entries:
+                        continue
+
+                    if not self.config.debug_collect_reference_predictions:
+                        obj = self.segmenter.segment_with_multi_reference(
+                            target_image, entries, label
+                        )
+                    else:
+                        obj = self._segment_with_debug(
+                            target_image, entries, label,
+                            [sp for _, _, _, sp in cluster_ref_data[label]],
+                            debug_predictions,
+                        )
+
+                    labeled_obj = self._make_labeled_object(
+                        obj, label, label_to_obj_id, ref_centroids, path
+                    )
+                    if labeled_obj is not None:
+                        result[path].append(labeled_obj)
+
+        else:  # iterative: one per-cluster session spanning all N targets
+            n_targets = len(target_entries)
+            for label in unique_labels:
+                entries = cluster_ref_entries[label]
+                if not entries:
+                    continue
+                logger.info(
+                    f"  [{label}] iterative session: "
+                    f"{len(entries)} refs + {n_targets} targets"
                 )
-                result[path] = self._apply_cc_filter(
-                    raw_objects, label_to_obj_id, ref_centroids, path
+                per_cluster = self.segmenter.segment_batch_iterative_per_cluster(
+                    target_entries, entries, label
                 )
-        else:  # iterative
-            raw_by_path = self.segmenter.segment_batch_iterative(
-                target_entries, references
-            )
-            for path, raw_objects in raw_by_path.items():
-                result[path] = self._apply_cc_filter(
-                    raw_objects, label_to_obj_id, ref_centroids, path
-                )
-            # Ensure every requested target is present in the output
-            for path in target_paths:
-                result.setdefault(path, [])
+                for path, obj in per_cluster.items():
+                    labeled_obj = self._make_labeled_object(
+                        obj, label, label_to_obj_id, ref_centroids, path
+                    )
+                    if labeled_obj is not None:
+                        result[path].append(labeled_obj)
 
         total = sum(len(v) for v in result.values())
         logger.info(
             f"Propagation complete: {total} objects "
             f"across {len(target_paths)} images"
         )
-        return result, memory_composition
+        return result, memory_composition, debug_predictions
 
-    def _apply_cc_filter(
+    # ------------------------------------------------------------------
+    # Private helpers
+    # ------------------------------------------------------------------
+
+    def _make_labeled_object(
         self,
-        raw_objects: list,
+        obj,
+        label: str,
         label_to_obj_id: dict[str, int],
         ref_centroids: dict[str, tuple[float, float]],
         path: Path,
-    ) -> list[LabeledObject]:
-        """Apply connected-component filter and build LabeledObjects."""
-        labeled: list[LabeledObject] = []
-        for obj in raw_objects:
-            if obj.label is None or obj.label not in label_to_obj_id:
-                continue
-            centroid = ref_centroids.get(obj.label, (0.0, 0.0))
-            filtered = select_closest_component(obj.mask, centroid)
-            if filtered is None or not filtered.any():
-                logger.debug(f"{path.name}: {obj.label} discarded by CC filter")
-                continue
-            obj.mask = filtered
-            labeled.append(LabeledObject(
-                segmented_object=obj,
-                organ_id=label_to_obj_id[obj.label],
-                organ_name=obj.label,
-                labeling_confidence=obj.confidence or 0.0,
-                method_used="propagation",
-            ))
-        return labeled
+    ) -> LabeledObject | None:
+        """Apply CC filter and wrap in a LabeledObject.  Returns None to skip."""
+        if obj is None or not obj.mask.any():
+            return None
+        centroid = ref_centroids.get(label, (0.0, 0.0))
+        filtered = select_closest_component(obj.mask, centroid)
+        if filtered is None or not filtered.any():
+            logger.debug(f"{path.name}: {label} discarded by CC filter")
+            return None
+        obj.mask = filtered
+        return LabeledObject(
+            segmented_object=obj,
+            organ_id=label_to_obj_id[label],
+            organ_name=label,
+            labeling_confidence=obj.confidence or 0.0,
+            method_used="propagation",
+        )
+
+    def _segment_with_debug(
+        self,
+        target_image: MedicalImage,
+        entries: list[tuple[np.ndarray, np.ndarray]],
+        label: str,
+        source_paths: list[str],
+        debug_predictions: list[dict],
+    ):
+        """Manual video session that also collects reference-frame predictions."""
+        from project.segmentation.medsam2.video import (
+            _video_session,
+            collect_frame_results,
+        )
+        from project.segmentation.utils import to_uint8
+
+        video_pred = self.segmenter._get_video_predictor()
+        obj_id = 1
+        K = len(entries)
+        ref_uint8s = [to_uint8(vol) for vol, _ in entries]
+        tgt_uint8 = to_uint8(target_image.volume)
+
+        def _register(vp, st):
+            for fi, (_, mask) in enumerate(entries):
+                vp.add_new_mask(
+                    inference_state=st,
+                    frame_idx=fi,
+                    obj_id=obj_id,
+                    mask=mask.astype(np.float32),
+                )
+            return {obj_id: label}
+
+        result = None
+        with _video_session(video_pred, ref_uint8s, [tgt_uint8], _register) as (state, organ_map):
+            for fi, obj_ids, masks in video_pred.propagate_in_video(state):
+                if fi < K:
+                    for pos, oid in enumerate(obj_ids):
+                        logits = masks[pos].cpu().numpy().squeeze()
+                        debug_predictions.append({
+                            "cluster_id": label,
+                            "frame_idx": fi,
+                            "source_path": source_paths[fi] if fi < len(source_paths) else "",
+                            "predicted_mask": logits > 0.0,
+                            "is_conditioning_frame": True,
+                            "is_target": False,
+                        })
+                elif fi == K:
+                    objects = collect_frame_results(masks, obj_ids, organ_map, target_image)
+                    if objects:
+                        result = objects[0]
+        return result

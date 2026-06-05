@@ -21,7 +21,7 @@ from project.core.data_types import LabeledObject
 from project.evaluation.cluster_vis import (
     save_feature_violin,
     save_mask_panel,
-    save_memory_composition_figure,
+    save_memory_composition_per_label,
 )
 from project.evaluation.visualizer import save_visualization
 from project.segmentation.quality import (
@@ -234,10 +234,8 @@ class ClusteringDebugWriter:
 
         out_dir = self.phase2_dir / "memory_composition"
         out_dir.mkdir(exist_ok=True)
-        save_memory_composition_figure(
-            memory_composition,
-            out_dir / "sam_memory.png",
-        )
+        # One image per cluster: sam_memory_{label}.png
+        save_memory_composition_per_label(memory_composition, out_dir)
 
     def _write_result_previews(self, labeled_by_image_propagated, image_paths):
         out_dir = self.phase2_dir / "result_previews"

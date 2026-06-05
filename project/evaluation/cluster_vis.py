@@ -215,6 +215,49 @@ def save_feature_violin(
 # SAM memory composition figure
 # ---------------------------------------------------------------------------
 
+def save_memory_composition_per_label(
+    memory_composition: list[dict],
+    out_dir: Path,
+    n_cols: int = 6,
+) -> None:
+    """Save one memory-composition figure per label (cluster / organ).
+
+    Groups entries in memory_composition by their 'label' field and calls
+    save_memory_composition_figure once per group.  Output files are named
+    sam_memory_{label}.png inside out_dir.
+
+    Parameters
+    ----------
+    memory_composition : list[dict]
+        Full memory_composition returned by PrototypePropagator.propagate().
+        Each entry must have at least 'label', 'frame_idx', 'obj_id',
+        'source_path', 'mask', 'combined_score', 'area'.
+    out_dir : Path
+        Directory where per-label PNG files will be written.
+    n_cols : int
+        Columns per figure (passed to save_memory_composition_figure).
+    """
+    if not memory_composition:
+        logger.warning("memory_composition is empty; skipping per-label figures.")
+        return
+
+    from collections import defaultdict
+    by_label: dict[str, list[dict]] = defaultdict(list)
+    for entry in memory_composition:
+        by_label[entry["label"]].append(entry)
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    for label in sorted(by_label):
+        entries = by_label[label]
+        save_memory_composition_figure(
+            entries,
+            out_dir / f"sam_memory_{label}.png",
+            n_cols=n_cols,
+        )
+
+
 def save_memory_composition_figure(
     memory_composition: list[dict],
     output_path: Path,

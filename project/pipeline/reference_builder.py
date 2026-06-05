@@ -48,6 +48,15 @@ def build_fewshot_references(
     logger.info(
         f"Few-shot references: {len(references)} frames, organs: {unique_organs}"
     )
+    for i, ref in enumerate(references):
+        organ_areas = {
+            organ: int(mask.sum()) for organ, mask in ref.masks.items()
+        }
+        logger.info(
+            f"  frame_{i}: {Path(ref.source_path).name}  "
+            f"organs={list(ref.masks.keys())}  "
+            f"areas={organ_areas}"
+        )
     return references, [1.0] * len(references)
 
 

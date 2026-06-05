@@ -48,10 +48,10 @@ class Labeler(ABC):
 class VideoSegmenter(Protocol):
     """Protocol for segmenters that support independent multi-reference propagation.
 
-    Each call to segment_with_video_prompts runs a fresh (K+1)-frame video
-    session using only the provided references — no state is shared between
-    calls.  Decouples PrototypePropagator from MedSAM2Segmenter so that stubs
-    satisfy the interface in tests without loading the GPU model.
+    Each call runs a fresh video session using only the provided references —
+    no state is shared between calls.  Decouples PrototypePropagator from
+    MedSAM2Segmenter so that stubs satisfy the interface in tests without
+    loading the GPU model.
     """
 
     def segment_with_video_prompts(
@@ -59,6 +59,34 @@ class VideoSegmenter(Protocol):
         target_image: "MedicalImage",
         references: list,
     ) -> "list[SegmentedObject]": ...
+
+    def segment_with_multi_reference(
+        self,
+        target_image: "MedicalImage",
+        reference_entries: "list[tuple[np.ndarray, np.ndarray]]",
+        organ_name: str,
+    ) -> "SegmentedObject | None":
+        """Run a single-object (K+1)-frame video session for one organ.
+
+        reference_entries is a list of (volume_array, mask_array) pairs.
+        Returns a SegmentedObject for the target frame, or None if SAM2
+        produces an empty mask.
+        """
+        ...
+
+    def segment_batch_iterative_per_cluster(
+        self,
+        target_entries: "list[tuple]",
+        reference_entries: "list[tuple[np.ndarray, np.ndarray]]",
+        organ_name: str,
+    ) -> "dict":
+        """Run a single-organ iterative (K+N)-frame session.
+
+        reference_entries: list of (volume_array, mask_array) pairs (K frames).
+        Memory accumulates from each target prediction into the next.
+        Returns {path: SegmentedObject | None} for each target.
+        """
+        ...
 
 
 class Propagator(ABC):

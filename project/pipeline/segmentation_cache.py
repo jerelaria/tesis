@@ -111,7 +111,7 @@ def resolve_segmentation(
     # Capture all cache state in the closure so the call site is pipeline-only.
     def compute_fn(pipeline):
         all_objects, objects_by_image = pipeline.phase1(
-            image_paths, references, force_embeddings=True
+            image_paths, force_embeddings=True
         )
         cache_dir.mkdir(parents=True, exist_ok=True)
         save_segmented(

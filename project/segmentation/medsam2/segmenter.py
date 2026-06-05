@@ -117,6 +117,99 @@ class MedSAM2Segmenter(Segmenter):
                     )
         return objects
 
+    def segment_with_multi_reference(
+        self,
+        target_image: MedicalImage,
+        reference_entries: list[tuple[np.ndarray, np.ndarray]],
+        organ_name: str,
+    ) -> SegmentedObject | None:
+        """Single-object (K+1)-frame video session for one organ.
+
+        reference_entries: list of (volume_array, mask_array) pairs (K frames).
+        Returns a SegmentedObject for the target frame, or None if the mask is empty.
+        """
+        if not reference_entries:
+            return None
+
+        video_pred = self._get_video_predictor()
+        obj_id = 1
+        K = len(reference_entries)
+        ref_uint8s = [to_uint8(vol) for vol, _ in reference_entries]
+        tgt_uint8 = to_uint8(target_image.volume)
+
+        def _register(vp, st):
+            for fi, (_, mask) in enumerate(reference_entries):
+                vp.add_new_mask(
+                    inference_state=st,
+                    frame_idx=fi,
+                    obj_id=obj_id,
+                    mask=mask.astype(np.float32),
+                )
+            return {obj_id: organ_name}
+
+        result = None
+        with _video_session(video_pred, ref_uint8s, [tgt_uint8], _register) as (state, organ_map):
+            for frame_idx, obj_ids, video_res_masks in video_pred.propagate_in_video(state):
+                if frame_idx == K:
+                    objects = collect_frame_results(
+                        video_res_masks, obj_ids, organ_map, target_image
+                    )
+                    if objects:
+                        result = objects[0]
+        return result
+
+    def segment_batch_iterative_per_cluster(
+        self,
+        target_entries: list[tuple[Path, MedicalImage]],
+        reference_entries: list[tuple[np.ndarray, np.ndarray]],
+        organ_name: str,
+    ) -> dict[Path, "SegmentedObject | None"]:
+        """Iterative (K+N)-frame session for a single organ.
+
+        Like segment_batch_iterative but for one organ only.
+        reference_entries: list of (volume_array, mask_array) pairs (K frames).
+        Memory accumulates from each target prediction into the next.
+        Returns {path: SegmentedObject | None} for each target.
+        """
+        if not target_entries or not reference_entries:
+            return {path: None for path, _ in target_entries}
+
+        video_pred = self._get_video_predictor()
+        obj_id = 1
+        K = len(reference_entries)
+
+        frame_to_path = {K + i: path for i, (path, _) in enumerate(target_entries)}
+        frame_to_image = {K + i: img for i, (_, img) in enumerate(target_entries)}
+
+        ref_uint8s = [to_uint8(vol) for vol, _ in reference_entries]
+        tgt_uint8s = [to_uint8(img.volume) for _, img in target_entries]
+
+        def _register(vp, st):
+            for fi, (_, mask) in enumerate(reference_entries):
+                vp.add_new_mask(
+                    inference_state=st,
+                    frame_idx=fi,
+                    obj_id=obj_id,
+                    mask=mask.astype(np.float32),
+                )
+            return {obj_id: organ_name}
+
+        results: dict[Path, "SegmentedObject | None"] = {
+            path: None for path, _ in target_entries
+        }
+        with _video_session(video_pred, ref_uint8s, tgt_uint8s, _register) as (state, organ_map):
+            for frame_idx, obj_ids, video_res_masks in video_pred.propagate_in_video(state):
+                if frame_idx not in frame_to_path:
+                    continue
+                path = frame_to_path[frame_idx]
+                source_image = frame_to_image[frame_idx]
+                objects = collect_frame_results(
+                    video_res_masks, obj_ids, organ_map, source_image
+                )
+                if objects:
+                    results[path] = objects[0]
+        return results
+
     def segment_batch_iterative(
         self,
         target_entries: list[tuple[Path, MedicalImage]],

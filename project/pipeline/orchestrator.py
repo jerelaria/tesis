@@ -17,6 +17,7 @@ from project.pipeline.reference_builder import (
     build_unsupervised_references,
 )
 from project.pipeline.phase2_debug import ClusteringDebugWriter
+from project.evaluation.cluster_vis import save_memory_composition_per_label
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +117,29 @@ class Pipeline:
             logger.warning("No references; returning empty result.")
             return {p: [] for p in image_paths}
 
-        labeled_by_image, _ = self.propagator.propagate(
+        # Build per-organ memory_composition (frame_idx resets per organ)
+        unique_labels = sorted({organ for ref in refs for organ in ref.masks})
+        label_to_obj_id = {label: i + 1 for i, label in enumerate(unique_labels)}
+        organ_frame_idx: dict[str, int] = {lbl: 0 for lbl in unique_labels}
+        fs_memory: list[dict] = []
+        for ref, score in zip(refs, frame_scores):
+            for organ_name, mask in ref.masks.items():
+                fs_memory.append({
+                    "frame_idx": organ_frame_idx[organ_name],
+                    "obj_id": label_to_obj_id[organ_name],
+                    "label": organ_name,
+                    "source_path": ref.source_path,
+                    "mask": mask,
+                    "combined_score": score,
+                    "area": int(mask.sum()),
+                })
+                organ_frame_idx[organ_name] += 1
+        mem_dir = phase4_dir / "memory_composition"
+        mem_dir.mkdir(exist_ok=True)
+        # One image per organ: sam_memory_{organ}.png
+        save_memory_composition_per_label(fs_memory, mem_dir)
+
+        labeled_by_image, _, _ = self.propagator.propagate(
             references=refs,
             frame_scores=frame_scores,
             target_paths=list(image_paths),
@@ -189,7 +212,7 @@ class Pipeline:
         references, frame_scores = build_unsupervised_references(
             labeled_by_image, self.propagator.config, self.reader
         )
-        labeled_by_image, memory = self.propagator.propagate(
+        labeled_by_image, memory, _ = self.propagator.propagate(
             references=references,
             frame_scores=frame_scores,
             target_paths=target_paths,
