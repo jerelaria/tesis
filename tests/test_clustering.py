@@ -8,6 +8,7 @@ from project.labeling.clustering import (
     ClusteringConfig,
     KMeansConfig,
     HDBSCANConfig,
+    DBSCANConfig,
     ClusteringAlgorithm,
 )
 from project.feature_extraction.feature_names import FEATURE_NAMES
@@ -154,3 +155,43 @@ def test_hdbscan_resolve_preserves_cluster_selection_method():
     )
     resolved = cfg.resolve(num_images=50)
     assert resolved.cluster_selection_method == "leaf"
+
+
+def test_hdbscan_confidence_from_probabilities():
+    """HDBSCAN labeling_confidence must come from the model's `probabilities_`,
+    not a binary clustered/noise flag."""
+    n_features = len(FEATURE_NAMES)
+    centers = [np.zeros(n_features), np.ones(n_features) * 5.0]
+    all_objects = [obj for c in centers for obj in _make_group(c, n=15)]
+
+    cfg = ClusteringConfig(
+        algorithm=ClusteringAlgorithm.HDBSCAN,
+        hdbscan=HDBSCANConfig(min_cluster_size=5, min_samples=1),
+    )
+    labeler = ClusteringLabeler(cfg)
+    labeler.fit(all_objects)
+    labeled = labeler.label(all_objects)
+
+    proba = labeler._model.probabilities_
+    for lab, p in zip(labeled, proba):
+        if lab.organ_id == -1:
+            assert lab.labeling_confidence == 0.0
+        else:
+            assert lab.labeling_confidence == pytest.approx(float(p))
+
+
+def test_dbscan_confidence_is_binary():
+    """DBSCAN has no soft assignment: non-noise -> 1.0, noise -> 0.0."""
+    n_features = len(FEATURE_NAMES)
+    centers = [np.zeros(n_features), np.ones(n_features) * 5.0]
+    all_objects = [obj for c in centers for obj in _make_group(c, n=15)]
+
+    cfg = ClusteringConfig(
+        algorithm=ClusteringAlgorithm.DBSCAN,
+        dbscan=DBSCANConfig(eps=0.5, min_samples=2),
+    )
+    labeler = ClusteringLabeler(cfg)
+    labeler.fit(all_objects)
+    labeled = labeler.label(all_objects)
+    for lab in labeled:
+        assert lab.labeling_confidence in (0.0, 1.0)

@@ -135,6 +135,7 @@ class ClusteringDebugWriter:
     def _write_prototypes(self, prototypes, cluster_to_obj_id, alpha, k):
         out_dir = self.phase2_dir / "prototypes"
         out_dir.mkdir(exist_ok=True)
+        logger.info(f"Prototypes -> {out_dir.name}/")
 
         for cid, proto_list in sorted(prototypes.items()):
             if not proto_list:
@@ -170,11 +171,11 @@ class ClusteringDebugWriter:
                 ),
                 n_cols=min(k, 5),
             )
-        logger.info(f"Prototypes -> {out_dir.name}/")
 
     def _write_top10_debug(self, labeled_by_image, good_clusters, alpha, k_debug=10):
         out_dir = self.phase2_dir / "top10_debug"
         out_dir.mkdir(exist_ok=True)
+        logger.info(f"Top-10 debug -> {out_dir.name}/")
 
         for cid in sorted(good_clusters):
             scored = []
@@ -209,7 +210,6 @@ class ClusteringDebugWriter:
                 suptitle=f"cluster_{cid} — top-{k_debug} by combined_score (debug)",
                 n_cols=5,
             )
-        logger.info(f"Top-10 debug -> {out_dir.name}/")
 
     def _write_feature_violin(self, labeled_by_image, features_csv):
         if not features_csv.exists():
@@ -218,6 +218,7 @@ class ClusteringDebugWriter:
 
         out_dir = self.phase2_dir / "feature_analysis"
         out_dir.mkdir(exist_ok=True)
+        logger.info(f"Feature violin -> {out_dir.name}/")
 
         cluster_id_by_object_id = {
             obj.segmented_object.id: (-1 if obj.is_noise else obj.organ_id)
@@ -225,7 +226,6 @@ class ClusteringDebugWriter:
             for obj in objs
         }
         save_feature_violin(cluster_id_by_object_id, features_csv, out_dir)
-        logger.info(f"Feature violin -> {out_dir.name}/")
 
     def _write_memory_composition(self, memory_composition):
         if not memory_composition:
@@ -242,16 +242,16 @@ class ClusteringDebugWriter:
         out_dir.mkdir(exist_ok=True)
 
         available = [p for p in image_paths if p in labeled_by_image_propagated]
-        rng = np.random.default_rng(self.seed)
         n = min(self.n_preview, len(available))
+        logger.info(f"Result previews ({n}) -> {out_dir.name}/")
+
+        rng = np.random.default_rng(self.seed)
         indices = sorted(rng.choice(len(available), size=n, replace=False).tolist())
 
         for idx in indices:
             path = available[idx]
             labeled = labeled_by_image_propagated.get(path, [])
             save_visualization(path, labeled, out_dir, suffix="_propagated")
-
-        logger.info(f"Result previews ({n}) -> {out_dir.name}/")
 
     def _write_filtered_clusters(
         self,
@@ -270,6 +270,7 @@ class ClusteringDebugWriter:
 
         out_dir = self.phase2_dir / "filtered_clusters"
         out_dir.mkdir(exist_ok=True)
+        logger.info(f"Filtered cluster panels ({len(filtered)}) -> filtered_clusters/")
 
         for cid, info in sorted(filtered.items()):
             scored = []
@@ -310,9 +311,6 @@ class ClusteringDebugWriter:
                 n_cols=min(n_show, 6),
             )
 
-        logger.info(
-            f"Filtered cluster panels ({len(filtered)}) -> filtered_clusters/"
-        )
 
     def _write_summary_json(
         self,
@@ -381,6 +379,6 @@ class ClusteringDebugWriter:
         }
 
         out = self.phase2_dir / "summary.json"
+        logger.info(f"Summary JSON -> {out.name}")
         with open(out, "w") as f:
             json.dump(summary, f, indent=2)
-        logger.info(f"Summary JSON -> {out.name}")

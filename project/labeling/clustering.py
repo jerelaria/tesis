@@ -5,8 +5,9 @@ Supports KMeans, DBSCAN, and HDBSCAN. HDBSCAN supports adaptive parameters
 computed as fractions of the dataset size for truly unsupervised operation.
 
 Labels are numeric cluster IDs. Noise points (DBSCAN/HDBSCAN) receive
-cluster_id -1 and confidence 0.0. No semantic organ name is assigned
-at this stage.
+cluster_id -1 and confidence 0.0. In HDBSCAN, non-noise points receive a
+graded confidence (soft cluster-membership probability from the condensed
+tree). DBSCAN remains binary. No semantic organ name is assigned at this stage.
 """
 
 import logging
@@ -165,7 +166,9 @@ class ClusteringLabeler(Labeler):
 
     Supports KMeans, DBSCAN and HDBSCAN. Labels are numeric cluster IDs.
     Noise points (DBSCAN/HDBSCAN) receive cluster_id -1 and confidence 0.0.
-    No semantic organ name is assigned at this stage.
+    In HDBSCAN, non-noise points receive a graded confidence (soft
+    cluster-membership probability from the condensed tree). DBSCAN remains
+    binary. No semantic organ name is assigned at this stage.
 
     IMPORTANT: fit() must receive objects from ALL images in the dataset,
     as label() performs a lookup over the mapping built during fit().
@@ -191,6 +194,7 @@ class ClusteringLabeler(Labeler):
         self._scaler = StandardScaler() if config.standardize else None
         self._embedding_reducer = None  # Fitted during fit()
         self.debug_dir: Path | None = None
+        self._id_to_proba: dict[str, float] = {}
 
     @classmethod
     def from_config(cls, yaml_path: str) -> "ClusteringLabeler":
@@ -280,6 +284,17 @@ class ClusteringLabeler(Labeler):
         logger.debug(f"Noise points: {(cluster_ids == -1).sum()}")
         logger.debug(f"Total points: {len(cluster_ids)}")
         self._id_to_cluster = {obj.id: int(cid) for obj, cid in zip(objects, cluster_ids)}
+
+        # HDBSCAN exposes a soft cluster-membership strength via `probabilities_`
+        # (noise = 0). Cache it per object id so label() can report a graded
+        # labeling confidence instead of a binary clustered/noise flag.
+        if (self.config.algorithm == ClusteringAlgorithm.HDBSCAN
+                and hasattr(self._model, "probabilities_")):
+            self._id_to_proba = {
+                obj.id: float(p)
+                for obj, p in zip(objects, self._model.probabilities_)
+            }
+
         self._is_fitted = True
 
     def label(self, objects: list[SegmentedObject]) -> list[LabeledObject]:
@@ -306,7 +321,7 @@ class ClusteringLabeler(Labeler):
 
         X = self._extract_feature_matrix(objects)
         cluster_ids = np.array([self._id_to_cluster[obj.id] for obj in objects])
-        confidences = self._compute_confidences(X, cluster_ids)
+        confidences = self._compute_confidences(X, cluster_ids, objects)
 
         labeled = []
         for obj, cluster_id, confidence in zip(objects, cluster_ids, confidences):
@@ -450,11 +465,14 @@ class ClusteringLabeler(Labeler):
                 random_state=42,
             )
 
-    def _compute_confidences(self, X: np.ndarray, cluster_ids: np.ndarray) -> np.ndarray:
+    def _compute_confidences(
+        self, X: np.ndarray, cluster_ids: np.ndarray,
+        objects: list[SegmentedObject],
+    ) -> np.ndarray:
         """Dispatcher: routes to the appropriate confidence computation method."""
         if self.config.algorithm == ClusteringAlgorithm.KMEANS:
             return self._confidences_kmeans(X, cluster_ids)
-        return self._confidences_density_based(X, cluster_ids)
+        return self._confidences_density_based(cluster_ids, objects)
 
     def _confidences_kmeans(self, X: np.ndarray, cluster_ids: np.ndarray) -> np.ndarray:
         """
@@ -476,11 +494,22 @@ class ClusteringLabeler(Labeler):
 
         return confidences
 
-    def _confidences_density_based(self, X: np.ndarray, cluster_ids: np.ndarray) -> np.ndarray:
+    def _confidences_density_based(
+        self, cluster_ids: np.ndarray, objects: list[SegmentedObject],
+    ) -> np.ndarray:
         """
-        Confidence score in [0, 1] for density-based algorithms (DBSCAN, HDBSCAN).
-        Noise points (cluster_id == -1) receive confidence 0.0.
-        Non-noise points receive confidence 1.0 as density-based algorithms
-        have no notion of soft assignment.
+        Confidence score in [0, 1] for density-based algorithms.
+
+        HDBSCAN: graded soft cluster-membership probability taken from the
+        condensed tree (sklearn exposes it as `probabilities_`); noise points
+        get 0.0. Objects not seen during fit() (predict_new) are absent from
+        the cache and fall back to 1.0 when non-noise.
+
+        DBSCAN: has no soft assignment, so non-noise -> 1.0, noise -> 0.0.
         """
+        if self.config.algorithm == ClusteringAlgorithm.HDBSCAN and self._id_to_proba:
+            confidences = np.empty(len(objects), dtype=float)
+            for i, (obj, cid) in enumerate(zip(objects, cluster_ids)):
+                confidences[i] = 0.0 if cid == -1 else self._id_to_proba.get(obj.id, 1.0)
+            return confidences
         return np.where(cluster_ids == -1, 0.0, 1.0)
