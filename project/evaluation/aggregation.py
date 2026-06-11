@@ -113,3 +113,35 @@ def aggregate_quality(all_results: list[dict]) -> dict:
         summary["global"][f"{key}_std_detected_only"]  = std_do
 
     return summary
+
+
+def add_panoptic_quality(summary: dict) -> None:
+    """
+    Materialise Panoptic Quality (PQ = SQ * RQ) in-place on a summary dict.
+
+    SQ (Segmentation Quality) is taken from ``iou_mean_detected_only`` — the
+    mean IoU over detected instances, which matches the panoptic-quality SQ
+    definition.
+
+    RQ (Recognition Quality) is taken from ``f1@0.5`` — the F1 score at the
+    standard IoU threshold.
+
+    Per-organ RQ and PQ are set to None because ``f1@0.5`` is not available at
+    organ level: precision per organ is undefined in hungarian matching mode
+    (predicted names are synthetic, so no per-organ cleanliness can be
+    computed). Only recall is available per organ.
+
+    Modifies ``summary["global"]`` and each entry in ``summary["per_organ"]``
+    in-place; adds keys ``"sq"``, ``"rq"``, ``"pq"``.
+    """
+    g = summary["global"]
+    sq = g.get("iou_mean_detected_only")
+    rq = g.get("f1@0.5")
+    g["sq"] = sq
+    g["rq"] = rq
+    g["pq"] = sq * rq if (sq is not None and rq is not None) else None
+
+    for organ_data in summary["per_organ"].values():
+        organ_data["sq"] = organ_data.get("iou_mean_detected_only")
+        organ_data["rq"] = None  # per-organ precision undefined in hungarian mode
+        organ_data["pq"] = None

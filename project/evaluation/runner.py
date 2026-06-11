@@ -10,7 +10,8 @@ computation, aggregation, and result saving across all image directories.
 import argparse
 from pathlib import Path
 
-from project.evaluation.aggregation import aggregate_quality
+from project.evaluation.aggregation import aggregate_quality, add_panoptic_quality
+from project.evaluation.conflict_resolution import resolve_overlaps
 from project.evaluation.coverage import compute_pr_counts, aggregate_pr
 from project.evaluation.io import (
     load_masks_from_dir,
@@ -23,7 +24,7 @@ from project.evaluation.matching import match_semantic, match_hungarian
 
 # 1.0 is excluded from the fine IoU grid: at threshold=1.0 only pixel-perfect
 # predictions are TP, which is degenerate for real-world masks.
-_DEFAULT_IOU_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+_DEFAULT_IOU_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9]
 
 
 def evaluate(
@@ -82,6 +83,14 @@ def evaluate(
 
         if not gt_masks:
             continue
+
+        # Resolve pixel-level overlaps between predictions before any metric
+        # computation.  Only applied when scores.json is present (pred_scores
+        # non-empty); older results without scores.json are evaluated as-is
+        # for backward compatibility.  If scores.json exists but a name is
+        # missing, resolve_overlaps raises rather than assuming a default score.
+        if pred_scores:
+            pred_masks = resolve_overlaps(pred_masks, pred_scores)
 
         image_results = match_fn(pred_masks, gt_masks, match_threshold)
         for r in image_results:
@@ -164,6 +173,7 @@ def evaluate(
         merged.update(pr_per_organ.get(organ, {}))
         summary["per_organ"][organ] = merged
 
+    add_panoptic_quality(summary)
     return all_results, summary
 
 

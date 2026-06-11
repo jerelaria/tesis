@@ -860,6 +860,303 @@ def plot_quality_metrics(data, output_dir, baseline_version, dataset_labels,
 
 
 # ---------------------------------------------------------------------------
+# Figure A (new): panoptic quality decomposition (PQ = SQ × RQ)
+# ---------------------------------------------------------------------------
+
+def plot_panoptic(data, output_dir, baseline_version, dataset_labels):
+    """
+    Per dataset, one figure with one subplot per category (Global + each organ).
+    Within each subplot: x = leaves, three adjacent bars per leaf for PQ
+    (annotated), SQ, and RQ.
+
+    PQ = SQ × RQ (multiplication, not addition): bars are adjacent, not stacked,
+    because the components do not sum to PQ.
+    SQ = mean IoU over matched pairs (segmentation quality).
+    RQ = F1@0.5 (recognition quality).
+
+    Per-organ RQ and PQ are written by add_panoptic_quality() only when per-organ
+    precision is available (WP2 evaluator extension). Until then those bars are
+    absent and the subplot shows only SQ.
+    """
+    _BAR_SPEC = [
+        ("pq", "PQ", "#1A6FB0"),
+        ("sq", "SQ", "#67A9CF"),
+        ("rq", "RQ", "#2E7D32"),
+    ]
+
+    for dataset in _all_datasets(data):
+        leaves = build_leaves(data, dataset, baseline_version)
+        if not leaves:
+            continue
+
+        organs: list[str] = sorted({
+            o for L in leaves for o in L["summary"].get("per_organ", {})
+        })
+        categories = ["Global"] + organs
+
+        n_leaf = len(leaves)
+        n_cat = len(categories)
+        bar_w = 0.8 / 3
+
+        fig, axes = plt.subplots(
+            n_cat, 1,
+            figsize=(max(8, n_leaf * 2.4), n_cat * 2.8),
+            squeeze=False,
+        )
+
+        for ci, cat in enumerate(categories):
+            ax = axes[ci][0]
+            x = np.arange(n_leaf)
+
+            any_bar = False
+            for li, L in enumerate(leaves):
+                s = L["summary"]
+                src = s.get("global", {}) if cat == "Global" \
+                    else s.get("per_organ", {}).get(cat, {})
+
+                for bi, (key, label, color) in enumerate(_BAR_SPEC):
+                    val = src.get(key)
+                    if val is None:
+                        continue
+                    bx = x[li] + (bi - 1) * bar_w
+                    ax.bar(bx, float(val), bar_w * 0.92,
+                           color=color, alpha=0.9,
+                           edgecolor="white", linewidth=0.5,
+                           label=label if (ci == 0 and li == 0) else None)
+                    if key == "pq":
+                        _bar_label(ax, bx, float(val), f"{val:.3f}", fs=6.5)
+                    any_bar = True
+
+            if not any_bar:
+                ax.text(0.5, 0.5, "— no data —", ha="center", va="center",
+                        transform=ax.transAxes, fontsize=10, color="#bbb")
+
+            ax.set_xticks(x)
+            ax.set_xticklabels(
+                [L["label"] for L in leaves],
+                fontsize=8, rotation=15, ha="right",
+            )
+            ax.set_ylim(0, 1.18)
+            ax.set_ylabel("Score", fontsize=9)
+            cat_title = cat if cat == "Global" \
+                else cat.replace("_", " ").title()
+            ax.set_title(cat_title, fontsize=10, fontweight="bold")
+            ax.grid(axis="y", alpha=0.3)
+            if ci == 0 and any_bar:
+                ax.legend(fontsize=8, loc="upper right", ncol=3)
+
+        fig.suptitle(
+            f"Panoptic quality decomposition (PQ = SQ × RQ) — "
+            f"{_dataset_label(dataset, dataset_labels)}",
+            fontsize=13, fontweight="bold",
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        out = output_dir / f"panoptic_{dataset}.png"
+        fig.savefig(out, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {out}")
+
+
+# ---------------------------------------------------------------------------
+# Figure B (new): per-organ detection at strict IoU thresholds
+# ---------------------------------------------------------------------------
+
+def plot_detection_strict(
+    data, output_dir, baseline_version, dataset_labels,
+    iou_thresholds=(0.5, 0.75),
+):
+    """
+    Per dataset, one figure with rows = organs and columns = IoU thresholds.
+    Each cell shows grouped bars per leaf for Recall, Precision, and F1.
+    The per-organ n_total (GT instance count, real denominator) is annotated
+    in each panel title.
+
+    iou_thresholds defaults to (0.5, 0.75). Per-organ data is stored only at
+    the thresholds listed in summary["iou_thresholds"] (typically 0.1..0.9 in
+    steps of 0.1); if a requested threshold is absent the corresponding bars
+    will be missing. Per-organ Precision and F1 are only written after WP2
+    adds them to the evaluator; until then only Recall bars will appear.
+    """
+    _METRICS = [
+        ("recall",    "Recall",    "#2E7D32"),
+        ("precision", "Precision", "#1A6FB0"),
+        ("f1",        "F1",        "#C62828"),
+    ]
+
+    for dataset in _all_datasets(data):
+        leaves = build_leaves(data, dataset, baseline_version)
+        if not leaves:
+            continue
+
+        organs: list[str] = sorted({
+            o for L in leaves for o in L["summary"].get("per_organ", {})
+        })
+        if not organs:
+            print(f"  [SKIP] detection_strict ({dataset}): no per-organ data.")
+            continue
+
+        n_leaf = len(leaves)
+        n_organ = len(organs)
+        n_iou = len(iou_thresholds)
+        n_met = len(_METRICS)
+        bar_w = 0.8 / n_met
+
+        fig, axes = plt.subplots(
+            n_organ, n_iou,
+            figsize=(max(7, n_leaf * 2.0) * n_iou, n_organ * 3.0),
+            squeeze=False,
+        )
+
+        for oi, organ in enumerate(organs):
+            # n_total is a property of the organ GT set; take the first
+            # non-None value found across leaves.
+            n_total: int | None = None
+            for L in leaves:
+                nt = (L["summary"].get("per_organ", {})
+                      .get(organ, {}).get("n_total"))
+                if nt is not None:
+                    n_total = int(nt)
+                    break
+
+            for ii, iou in enumerate(iou_thresholds):
+                ax = axes[oi][ii]
+                x = np.arange(n_leaf)
+
+                for mi, (met, met_label, color) in enumerate(_METRICS):
+                    offset = (mi - n_met / 2 + 0.5) * bar_w
+                    for li, L in enumerate(leaves):
+                        od = (L["summary"].get("per_organ", {})
+                              .get(organ, {}))
+                        raw = od.get(f"{met}@{iou}")
+                        if raw is None:
+                            continue
+                        val = float(raw)
+                        bx = x[li] + offset
+                        ax.bar(bx, val, bar_w * 0.92, color=color, alpha=0.9,
+                               edgecolor="white", linewidth=0.5,
+                               label=met_label
+                               if (oi == 0 and ii == 0 and li == 0) else None)
+                        _bar_label(ax, bx, val, f"{val:.3f}", fs=6)
+
+                ax.set_xticks(x)
+                ax.set_xticklabels(
+                    [L["label"] for L in leaves],
+                    fontsize=8, rotation=15, ha="right",
+                )
+                ax.set_ylim(0, 1.22)
+                ax.set_ylabel("Score", fontsize=9)
+                organ_title = organ.replace("_", " ").title()
+                n_txt = f"  (n={n_total})" if n_total is not None else ""
+                ax.set_title(
+                    f"{organ_title} — IoU ≥ {iou:g}{n_txt}",
+                    fontsize=10, fontweight="bold",
+                )
+                ax.grid(axis="y", alpha=0.3)
+                if oi == 0 and ii == 0:
+                    ax.legend(fontsize=8, loc="lower right", ncol=3)
+
+        fig.suptitle(
+            f"Detection per organ (strict IoU) — "
+            f"{_dataset_label(dataset, dataset_labels)}",
+            fontsize=13, fontweight="bold",
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.97])
+        out = output_dir / f"detection_strict_{dataset}.png"
+        fig.savefig(out, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {out}")
+
+
+# ---------------------------------------------------------------------------
+# Figure C (new, appendix): detection metrics vs IoU threshold  [APPENDIX]
+# ---------------------------------------------------------------------------
+
+def plot_detection_vs_iou_appendix(data, output_dir, baseline_version,
+                                   dataset_labels):
+    """
+    Per dataset, three panels (Recall / Precision / F1) showing how each
+    metric changes as the IoU detection threshold tightens. One line per leaf,
+    coloured by approach group (same palette as all other figures in this file).
+
+    Data source: summary["detection_per_threshold"], keyed by IoU threshold
+    string, values {recall, precision, f1, n_gt_covered, n_pred_relevant}.
+
+    IMPORTANT — this is NOT a precision-recall curve:
+      * A PR curve sweeps the confidence SCORE at a fixed IoU gate.
+      * This figure sweeps the IoU THRESHOLD (overlap requirement for a true
+        positive), treating every prediction equally (no score sweep).
+    It answers "how strict must the overlap be before performance collapses?"
+    and is the per-approach overlay complement of plot_pr_f1_vs_iou_grid (which
+    shows the same sweep as a grid, one cell per leaf). Intended for the thesis
+    appendix; not called by default in main().
+    """
+    _PANELS = [
+        ("recall",    "Recall",    "s"),
+        ("precision", "Precision", "o"),
+        ("f1",        "F1",        "^"),
+    ]
+
+    for dataset in _all_datasets(data):
+        leaves = build_leaves(data, dataset, baseline_version)
+        if not leaves:
+            continue
+
+        thr_set: set[float] = set()
+        for L in leaves:
+            for k in L["summary"].get("detection_per_threshold", {}):
+                thr_set.add(float(k))
+        if not thr_set:
+            print(f"  [SKIP] detection_vs_iou_appendix ({dataset}): "
+                  "no detection_per_threshold data.")
+            continue
+        thrs = sorted(thr_set)
+
+        fig, axes = plt.subplots(
+            1, len(_PANELS),
+            figsize=(len(_PANELS) * 4.6, 4.4),
+            squeeze=False,
+        )
+        axes = axes[0]
+
+        for pi, (metric, panel_label, marker) in enumerate(_PANELS):
+            ax = axes[pi]
+            for L in leaves:
+                det = L["summary"].get("detection_per_threshold", {})
+                det_f = {float(k): v for k, v in det.items()}
+                pts = [
+                    (t, det_f[t].get(metric))
+                    for t in thrs
+                    if t in det_f and det_f[t].get(metric) is not None
+                ]
+                if not pts:
+                    continue
+                xs, ys = zip(*pts)
+                ax.plot(xs, ys, marker=marker, color=L["color"],
+                        linewidth=1.8, markersize=4, alpha=0.9,
+                        label=L["label"].replace("\n", " "))
+
+            ax.set_xlim(thrs[0] - 0.03, thrs[-1] + 0.03)
+            ax.set_ylim(0, 1.05)
+            ax.set_xlabel("IoU threshold", fontsize=10)
+            ax.set_ylabel(panel_label, fontsize=10)
+            ax.set_title(panel_label, fontsize=11, fontweight="bold")
+            ax.grid(alpha=0.3)
+            if pi == len(_PANELS) - 1:
+                ax.legend(fontsize=7, loc="lower left")
+
+        fig.suptitle(
+            f"Detection performance vs IoU threshold — "
+            f"{_dataset_label(dataset, dataset_labels)}",
+            fontsize=13, fontweight="bold",
+        )
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+        out = output_dir / f"detection_vs_iou_appendix_{dataset}.png"
+        fig.savefig(out, dpi=180, bbox_inches="tight")
+        plt.close(fig)
+        print(f"  Saved: {out}")
+
+
+# ---------------------------------------------------------------------------
 # Optional: COCO-style PR overlay (sweeps prediction SCORE)
 # ---------------------------------------------------------------------------
 
@@ -1043,6 +1340,9 @@ def main():
                         help="Candidate match cutoffs marked on the vs-IoU grid.")
     parser.add_argument("--pr-overlay", action="store_true",
                         help="Also generate the COCO-style PR overlay (score sweep).")
+    parser.add_argument("--detection-appendix", action="store_true",
+                        help="Generate the appendix figure: R/P/F1 vs IoU threshold "
+                             "(all leaves overlaid per dataset). NOT a PR curve.")
     parser.add_argument("--dataset-labels", nargs="*", metavar="DATASET:LABEL",
                         default=[], help="DATASET:LABEL overrides for titles.")
     args = parser.parse_args()
@@ -1068,35 +1368,46 @@ def main():
     if match_thr is not None:
         print(f"Detected match_threshold (mode across summaries): {match_thr:g}")
 
-    print("\n[1/7] P/R/F1 vs IoU grid (rows=datasets, cols=approaches):")
+    print("\n[1/9] P/R/F1 vs IoU grid (rows=datasets, cols=approaches):")
     plot_pr_f1_vs_iou_grid(data, output_dir, datasets, args.baseline_version,
                            dataset_labels, args.cutoffs)
 
-    print("\n[2/7] Detection comparison (P/R/F1 @0.5):")
+    print("\n[2/9] Detection comparison (P/R/F1 @0.5):")
     plot_approach_comparison(data, output_dir, args.baseline_version,
                              dataset_labels)
 
-    print("\n[3/7] Per-organ recall (and precision if available):")
+    print("\n[3/9] Per-organ recall (and precision if available):")
     plot_per_organ(data, output_dir, args.baseline_version, dataset_labels,
                    "recall@0.5", "Recall@0.5", "recall_per_organ")
     plot_per_organ(data, output_dir, args.baseline_version, dataset_labels,
                    "precision@0.5", "Precision@0.5", "precision_per_organ")
 
-    print("\n[4/7] mAP summary heatmap:")
+    print("\n[4/9] mAP summary heatmap:")
     plot_map_summary(data, output_dir, args.baseline_version, dataset_labels)
 
-    print("\n[5/7] Dice (own scale):")
+    print("\n[5/9] Dice (own scale):")
     plot_dice(data, output_dir, args.baseline_version, dataset_labels, match_thr)
 
-    print("\n[6/7] Quality metrics panels (Dice/IoU/HD95/ASSD):")
+    print("\n[6/9] Quality metrics panels (Dice/IoU/HD95/ASSD):")
     plot_quality_metrics(data, output_dir, args.baseline_version,
                          dataset_labels, match_thr)
+
+    print("\n[7/9] Panoptic quality decomposition (PQ / SQ / RQ):")
+    plot_panoptic(data, output_dir, args.baseline_version, dataset_labels)
+
+    print("\n[8/9] Detection per organ (strict IoU 0.5 / 0.75):")
+    plot_detection_strict(data, output_dir, args.baseline_version, dataset_labels)
 
     if args.pr_overlay:
         print("\n[Optional] PR-curve overlay (score sweep):")
         plot_pr_overlay(data, output_dir, args.baseline_version, dataset_labels)
 
-    print("\n[7/7] Flat CSV export:")
+    if args.detection_appendix:
+        print("\n[Optional, appendix] Detection performance vs IoU threshold:")
+        plot_detection_vs_iou_appendix(data, output_dir, args.baseline_version,
+                                       dataset_labels)
+
+    print("\n[9/9] Flat CSV export:")
     save_full_csv(data, output_dir, args.baseline_version)
 
     print(f"\nAll comparison artifacts saved to {output_dir}")

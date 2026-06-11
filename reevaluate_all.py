@@ -18,7 +18,7 @@ Usage
 
     # Stricter quality gate, custom IoU grid:
     python reevaluate_all.py --match-threshold 0.75 \\
-        --iou-thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9
+        --iou-thresholds 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.75 0.8 0.9
 
     # Only specific versions and experiments:
     python reevaluate_all.py \\
@@ -61,7 +61,7 @@ _DATASET_GT_DEFAULTS: dict[str, str] = {
 }
 
 # 1.0 excluded: pixel-perfect threshold is degenerate for real-world masks
-_DEFAULT_IOU_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+_DEFAULT_IOU_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9]
 
 
 def _auto_matching(exp_name: str) -> str:
