@@ -21,6 +21,7 @@ from project.core.data_types import LabeledObject
 from project.evaluation.cluster_vis import (
     save_feature_violin,
     save_mask_panel,
+    save_memory_composition_by_image,
     save_memory_composition_per_label,
 )
 from project.evaluation.visualizer import save_visualization
@@ -115,7 +116,9 @@ class ClusteringDebugWriter:
         self._write_top10_debug(labeled_by_image_clustering, good_clusters, alpha)
         self._write_filtered_clusters(labeled_by_image_clustering, quality_report, alpha)
         self._write_feature_violin(labeled_by_image_clustering, features_csv)
-        self._write_memory_composition(memory_composition)
+        self._write_memory_composition(
+            memory_composition, propagation_config.reference_mode
+        )
         self._write_result_previews(labeled_by_image_propagated, image_paths)
         self._write_summary_json(
             good_clusters=good_clusters,
@@ -227,15 +230,19 @@ class ClusteringDebugWriter:
         }
         save_feature_violin(cluster_id_by_object_id, features_csv, out_dir)
 
-    def _write_memory_composition(self, memory_composition):
+    def _write_memory_composition(self, memory_composition, reference_mode):
         if not memory_composition:
             logger.debug("Empty memory_composition — skipping figure")
             return
 
         out_dir = self.phase2_dir / "memory_composition"
         out_dir.mkdir(exist_ok=True)
-        # One image per cluster: sam_memory_{label}.png
-        save_memory_composition_per_label(memory_composition, out_dir)
+        if reference_mode == "multiorgan":
+            # Shared K anchors, all masks per anchor (sam_memory.png)
+            save_memory_composition_by_image(memory_composition, out_dir)
+        else:
+            # Mono-organ: one isolated memory per cluster (sam_memory_{label}.png)
+            save_memory_composition_per_label(memory_composition, out_dir)
 
     def _write_result_previews(self, labeled_by_image_propagated, image_paths):
         out_dir = self.phase2_dir / "result_previews"

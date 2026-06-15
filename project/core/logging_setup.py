@@ -15,6 +15,9 @@ def setup_logging(verbose: bool = False, log_file: str | None = None) -> None:
         datefmt="%H:%M:%S",
         handlers=handlers,
     )
+    # Suppress noisy third-party debug output regardless of verbose flag.
+    for noisy in ("matplotlib", "PIL", "umap", "numba"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
 
 
 def _set_deterministic(seed: int = 42) -> None:

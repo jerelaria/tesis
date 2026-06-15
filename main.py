@@ -110,6 +110,13 @@ def main(args) -> None:
 
     preloaded = res.compute_fn(pipeline) if res.compute_fn else res.preloaded
 
+    if args.export_references:
+        out_root = Path(args.export_references)
+        logger.info(f"Exporting prototypes as few-shot references to {out_root}")
+        n = pipeline.export_references(image_paths, out_root, preloaded=preloaded)
+        logger.info(f"Done: {n} reference frames written. Skipping propagation.")
+        return
+
     if args.segmentation_only:
         save_resolved_config(
             cfg=cfg,
@@ -145,6 +152,17 @@ if __name__ == "__main__":
     p.add_argument("--ref-images", nargs="*", help="Reference directory names")
     p.add_argument("--override", nargs="*", default=[], metavar="K=V",
                    help="Dot-notation config overrides: key.sub=value")
+    p.add_argument(
+        "--export-references",
+        metavar="DIR",
+        help=(
+            "Build unsupervised prototypes (Phase 1 cached + Phase 2 clustering "
+            "+ prototype selection) and write them as a few-shot reference tree "
+            "under DIR (e.g. data/few_shot/ACDC), then exit. Skips the expensive "
+            "full-dataset propagation. Use the result as the memory for a "
+            "few_shot run on another dataset."
+        ),
+    )
     p.add_argument(
         "--segmentation-only",
         action="store_true",

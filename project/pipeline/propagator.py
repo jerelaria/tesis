@@ -71,6 +71,11 @@ class PropagationConfig:
         "independent" — one session per (cluster, target) pair (default).
         "iterative"   — one session per cluster spanning all N targets;
                         memory accumulates from predicted targets.
+    reference_mode : str
+        Unsupervised reference builder selection.
+        "monoorgan"  — interleaved mono-organ reference frames (default).
+        "multiorgan" — K multi-organ reference frames (cross-propagated and
+                       IoU-merged).  Only affects the unsupervised path.
     debug_collect_reference_predictions : bool
         When True, collect SAM2 predictions on reference frames (not just the
         target) for each per-cluster video session.  Used to visualize memory
@@ -81,6 +86,7 @@ class PropagationConfig:
     quality: ClusterQualityConfig = field(default_factory=ClusterQualityConfig)
     mask_selection: MaskSelectionConfig = field(default_factory=MaskSelectionConfig)
     mode: str = "independent"
+    reference_mode: str = "monoorgan"
     debug_collect_reference_predictions: bool = False
 
     def __post_init__(self):
@@ -92,6 +98,11 @@ class PropagationConfig:
             raise ValueError(
                 f"PropagationConfig.mode must be 'independent' or 'iterative', "
                 f"got {self.mode!r}"
+            )
+        if self.reference_mode not in ("monoorgan", "multiorgan"):
+            raise ValueError(
+                f"PropagationConfig.reference_mode must be 'monoorgan' or "
+                f"'multiorgan', got {self.reference_mode!r}"
             )
 
 

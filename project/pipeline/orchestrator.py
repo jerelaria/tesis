@@ -15,9 +15,11 @@ from project.pipeline.propagator import PropagationConfig, PrototypePropagator
 from project.pipeline.reference_builder import (
     build_fewshot_references,
     build_unsupervised_references,
+    build_unsupervised_multiorgan_references,
+    export_references_to_fewshot,
 )
 from project.pipeline.phase2_debug import ClusteringDebugWriter
-from project.evaluation.cluster_vis import save_memory_composition_per_label
+from project.evaluation.cluster_vis import save_memory_composition_by_image
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +98,57 @@ class Pipeline:
         return labeled_by_image
 
     # ------------------------------------------------------------------
+    # Export prototypes as a reusable few-shot reference tree
+    # ------------------------------------------------------------------
+
+    def export_references(
+        self,
+        image_paths,
+        out_root: Path,
+        preloaded: tuple | None = None,
+    ) -> int:
+        """Build unsupervised prototypes and dump them as few-shot refs.
+
+        Runs Phase 1 (segmentation+features, reused from cache when preloaded)
+        and Phase 2 (clustering), then builds the reference frames exactly as
+        Phase 4 would, and writes them under ``out_root`` as a few-shot tree.
+        The expensive full-dataset propagation is skipped — only the per-cluster
+        prototype selection (and, for multiorgan mode, the small cross-fill over
+        the prototype pool) is computed.
+        """
+        if self.labeler is None:
+            raise RuntimeError(
+                "export_references requires clustering to be enabled."
+            )
+
+        if preloaded is not None:
+            all_objects, objects_by_image = preloaded
+            logger.info(
+                f"Phase 1 skipped: using {len(all_objects)} cached objects "
+                f"from {len(objects_by_image)} images"
+            )
+        else:
+            all_objects, objects_by_image = self.phase1(image_paths)
+
+        labeled_by_image_clustering = self.phase2(all_objects, objects_by_image)
+
+        if self.propagator.config.reference_mode == "multiorgan":
+            references, _ = build_unsupervised_multiorgan_references(
+                labeled_by_image_clustering, self.propagator.config,
+                self.reader, self.segmenter,
+            )
+        else:
+            references, _ = build_unsupervised_references(
+                labeled_by_image_clustering, self.propagator.config, self.reader
+            )
+
+        if not references:
+            logger.warning("No references built; nothing exported.")
+            return 0
+
+        return export_references_to_fewshot(references, out_root)
+
+    # ------------------------------------------------------------------
     # Few-shot direct propagation (no Phase 1/2/3)
     # ------------------------------------------------------------------
 
@@ -136,8 +189,8 @@ class Pipeline:
                 organ_frame_idx[organ_name] += 1
         mem_dir = phase4_dir / "memory_composition"
         mem_dir.mkdir(exist_ok=True)
-        # One image per organ: sam_memory_{organ}.png
-        save_memory_composition_per_label(fs_memory, mem_dir)
+        # One panel of the real memory: a subplot per anchor image (sam_memory.png)
+        save_memory_composition_by_image(fs_memory, mem_dir)
 
         labeled_by_image, _, _ = self.propagator.propagate(
             references=refs,
@@ -209,9 +262,15 @@ class Pipeline:
         phase4_dir = self.results_dir / "phase4_propagation"
         phase4_dir.mkdir(exist_ok=True)
 
-        references, frame_scores = build_unsupervised_references(
-            labeled_by_image, self.propagator.config, self.reader
-        )
+        if self.propagator.config.reference_mode == "multiorgan":
+            references, frame_scores = build_unsupervised_multiorgan_references(
+                labeled_by_image, self.propagator.config, self.reader,
+                self.segmenter,
+            )
+        else:
+            references, frame_scores = build_unsupervised_references(
+                labeled_by_image, self.propagator.config, self.reader
+            )
         labeled_by_image, memory, _ = self.propagator.propagate(
             references=references,
             frame_scores=frame_scores,

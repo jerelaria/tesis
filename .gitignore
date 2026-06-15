@@ -41,6 +41,7 @@ results_10/
 results*/
 archive/
 configs/datasets/synthetic_curves/
+diagnostics/
 
 # ── Notebook artifact images (auto-generated) ────────────
 notebooks/*.png

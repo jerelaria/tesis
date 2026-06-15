@@ -220,22 +220,23 @@ def save_memory_composition_per_label(
     out_dir: Path,
     n_cols: int = 6,
 ) -> None:
-    """Save one memory-composition figure per label (cluster / organ).
+    """Save one memory figure per label — the mono-organ memory layout.
 
-    Groups entries in memory_composition by their 'label' field and calls
-    save_memory_composition_figure once per group.  Output files are named
-    sam_memory_{label}.png inside out_dir.
+    In mono-organ propagation each cluster owns an isolated SAM2 session, so its
+    memory is its own set of prototype frames (each frame carries only that
+    cluster's mask).  Entries are grouped by 'label' and one figure per cluster
+    is written as sam_memory_{label}.png, each a grid of that cluster's frames.
 
     Parameters
     ----------
     memory_composition : list[dict]
         Full memory_composition returned by PrototypePropagator.propagate().
-        Each entry must have at least 'label', 'frame_idx', 'obj_id',
-        'source_path', 'mask', 'combined_score', 'area'.
+        Each entry has 'label', 'frame_idx', 'obj_id', 'source_path', 'mask',
+        'combined_score', 'area'.
     out_dir : Path
-        Directory where per-label PNG files will be written.
+        Directory where per-label PNG files are written.
     n_cols : int
-        Columns per figure (passed to save_memory_composition_figure).
+        Columns per figure.
     """
     if not memory_composition:
         logger.warning("memory_composition is empty; skipping per-label figures.")
@@ -249,45 +250,30 @@ def save_memory_composition_per_label(
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for label in sorted(by_label):
-        entries = by_label[label]
-        save_memory_composition_figure(
-            entries,
+    for label in sorted(by_label, key=lambda x: str(x)):
+        _save_memory_label_figure(
+            by_label[label],
             out_dir / f"sam_memory_{label}.png",
             n_cols=n_cols,
         )
 
 
-def save_memory_composition_figure(
-    memory_composition: list[dict],
+def _save_memory_label_figure(
+    entries: list[dict],
     output_path: Path,
     n_cols: int = 6,
 ) -> None:
-    """
-    Grid figure showing every reference frame seeded into SAM2's video predictor.
+    """Grid of the prototype frames seeded for a single cluster's memory.
 
-    Each subplot shows:
-    - Source MRI (grayscale)
-    - Prototype mask overlay (coloured by cluster_id)
-    - Title: frame_idx, obj_id, cluster_id, source filename, area, combined_score
-
-    Parameters
-    ----------
-    memory_composition : list[dict]
-        Each entry: frame_idx, obj_id, cluster_id, source_path,
-        mask (np.ndarray), combined_score, area.
-    output_path : Path
-        Where to save the figure.
-    n_cols : int
-        Number of columns in the grid.
+    One subplot per frame: the source image with that frame's single mask
+    overlaid, titled with frame_idx, obj_id, label, source name, area and score.
     """
-    if not memory_composition:
-        logger.warning("memory_composition is empty; skipping figure.")
+    if not entries:
         return
 
-    entries = []
-    for entry in memory_composition:
-        label = entry.get("label", str(entry.get("obj_id", "?")))
+    panel_entries = []
+    for entry in entries:
+        label = entry.get("label", entry.get("obj_id", "?"))
         obj_id = entry["obj_id"]
         frame_idx = entry["frame_idx"]
         source_path = entry.get("source_path", "")
@@ -309,12 +295,142 @@ def save_memory_composition_figure(
             f"{src_name}\n"
             f"area={area}  score={score:.3f}"
         )
-        entries.append((img, mask, obj_id, title))
+        panel_entries.append((img, mask, obj_id, title))
 
-    n_frames = len(entries)
+    n_frames = len(panel_entries)
     suptitle = (
-        f"SAM2 memory composition  —  {n_frames} reference frames\n"
-        f"(obj_id = sorted_position(cluster_id) + 1,  SAM rejects obj_id=0)"
+        f"SAM2 memory — label={entries[0].get('label', '?')}  "
+        f"({n_frames} reference frames)\n"
+        f"(obj_id = sorted_position(label) + 1,  SAM rejects obj_id=0)"
     )
-    save_mask_panel(entries, output_path, suptitle=suptitle, n_cols=n_cols)
+    save_mask_panel(panel_entries, output_path, suptitle=suptitle, n_cols=n_cols)
+    logger.info(f"Memory composition figure -> {output_path.name}")
+
+
+def save_memory_composition_by_image(
+    memory_composition: list[dict],
+    out_dir: Path,
+    n_cols: int = 5,
+) -> None:
+    """Save the real SAM2 memory as a single panel, one subplot per anchor image.
+
+    For the multi-organ / few-shot layout the K anchor images are shared across
+    organs, so entries are grouped by 'source_path' (the anchor image) and
+    rendered as one figure whose subplots are the K anchor frames; every mask of
+    an anchor is overlaid on it, one colour per label.
+
+    Parameters
+    ----------
+    memory_composition : list[dict]
+        Full memory_composition returned by PrototypePropagator.propagate().
+        Each entry must have at least 'label', 'frame_idx', 'obj_id',
+        'source_path', 'mask', 'combined_score', 'area'.
+    out_dir : Path
+        Directory where the panel "sam_memory.png" is written.
+    n_cols : int
+        Columns in the anchor grid.
+    """
+    if not memory_composition:
+        logger.warning("memory_composition is empty; skipping memory figure.")
+        return
+
+    from collections import defaultdict
+    by_source: dict[str, list[dict]] = defaultdict(list)
+    for entry in memory_composition:
+        by_source[entry.get("source_path", "")].append(entry)
+
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    _save_memory_anchor_panel(
+        by_source,
+        out_dir / "sam_memory.png",
+        n_cols=n_cols,
+    )
+
+
+def _save_memory_anchor_panel(
+    by_source: dict[str, list[dict]],
+    output_path: Path,
+    n_cols: int = 5,
+) -> None:
+    """
+    Panel of the SAM2 memory: one subplot per anchor image, all masks overlaid.
+
+    Each subplot shows:
+    - The anchor image (grayscale)
+    - Every mask seeded for that anchor, one colour per label (obj_id)
+    - Title: anchor filename and the list of organs present
+
+    Parameters
+    ----------
+    by_source : dict[str, list[dict]]
+        memory_composition entries grouped by 'source_path'.  Each entry has
+        'label', 'frame_idx', 'obj_id', 'source_path', 'mask', 'combined_score',
+        'area'.
+    output_path : Path
+        Where to save the figure.
+    n_cols : int
+        Number of columns in the anchor grid.
+    """
+    if not by_source:
+        logger.warning("No anchors to render; skipping memory figure.")
+        return
+
+    # Deterministic anchor order: by earliest frame_idx, then by filename.
+    sources = sorted(
+        by_source,
+        key=lambda s: (min(e["frame_idx"] for e in by_source[s]), Path(s).name),
+    )
+
+    n_anchors = len(sources)
+    n_rows = (n_anchors + n_cols - 1) // n_cols
+    fig, axes = plt.subplots(
+        n_rows, n_cols,
+        figsize=(max(5, 4 * n_cols), max(4, 4 * n_rows)),
+        squeeze=False,
+    )
+
+    total_masks = 0
+    for i, source_path in enumerate(sources):
+        ax = axes[i // n_cols][i % n_cols]
+        entries = by_source[source_path]
+
+        sample_mask = entries[0]["mask"]
+        if source_path:
+            try:
+                img = np.array(plt.imread(source_path))
+            except Exception:
+                img = np.zeros((*sample_mask.shape, 3), dtype=np.uint8)
+        else:
+            img = np.zeros((*sample_mask.shape, 3), dtype=np.uint8)
+        ax.imshow(img, cmap="gray")
+
+        organs = []
+        for entry in sorted(entries, key=lambda e: e["obj_id"]):
+            mask = entry["mask"]
+            color = _get_cluster_color(entry["obj_id"], alpha=0.45)
+            overlay = np.zeros((*mask.shape, 4), dtype=np.float32)
+            overlay[mask] = color
+            ax.imshow(overlay)
+            ax.contour(mask, levels=[0.5], colors=[color[:3]], linewidths=1.5)
+            organs.append(str(entry.get("label", entry["obj_id"])))
+            total_masks += 1
+
+        src_name = Path(source_path).name if source_path else "?"
+        ax.set_title(f"{src_name}\norgans: {', '.join(organs)}", fontsize=7)
+        ax.axis("off")
+
+    for j in range(n_anchors, n_rows * n_cols):
+        axes[j // n_cols][j % n_cols].set_visible(False)
+
+    fig.suptitle(
+        f"SAM2 memory composition  —  {n_anchors} anchor frames, "
+        f"{total_masks} masks\n"
+        f"(one colour per label;  obj_id = sorted_position(label) + 1)",
+        fontsize=10,
+    )
+    fig.tight_layout()
+    fig.savefig(output_path, bbox_inches="tight", dpi=140)
+    plt.close(fig)
     logger.info(f"Memory composition figure -> {output_path.name}")

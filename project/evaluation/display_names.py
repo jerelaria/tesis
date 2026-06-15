@@ -6,6 +6,7 @@ DISPLAY_NAMES = {
     "unsup_hdbscan":                   "HDBSCAN (no prop.)",
     "unsup_hdbscan_propagation":       "HDBSCAN + Prop. Indep.",
     "unsup_hdbscan_propagation_iter":  "HDBSCAN + Prop. Iter.",
+    "unsup_hdbscan_propagation_multiorgan": "HDBSCAN + Prop. Multi-órgano",
     # --- Few-shot baseline ---
     "fs_baseline_1ref":   "SAM2 Video (1 ref)",
     "fs_baseline_4ref":   "SAM2 Video (4 ref)",
@@ -31,6 +32,7 @@ EXPERIMENT_ORDER = [
     "unsup_hdbscan",
     "unsup_hdbscan_propagation",
     "unsup_hdbscan_propagation_iter",
+    "unsup_hdbscan_propagation_multiorgan",
     # Few-shot 1-ref
     "fs_baseline_1ref",
     "fs_propagation_1ref",

@@ -1,299 +1,225 @@
 #!/bin/bash
-set -e
-
 # ============================================================================
-# run_all.sh — Run full experiment suite across datasets
-# ============================================================================
+# run_experiments.sh
+# ----------------------------------------------------------------------------
+# Final experiment catalog, per dataset (15 runs):
+#   - baseline                 : raw grid (no clustering). Feature-independent,
+#                                run once.                                  (1)
+#   - unsupervised             : {propagation independent, propagation iterative}
+#                                x feature versions {moments, embeddings_red,
+#                                embeddings_raw, emb_momentos}.             (8)
+#   - few-shot                 : {independent, iterative} x K in {1,3,5}.
+#                                Reference-based, feature-independent.      (6)
+#
+#   Two datasets (Sunnybrook, XRay) -> 30 runs.
+#
+# Pass --no-embeddings to drop every embedding-based version (keeps only
+# 'moments'); baseline and few-shot are unaffected.
+#
+# Each run is evaluated inline (hungarian for unsup_*, semantic for fs_*).
+# The segmentation cache is shared; the first run of each segmentation group
+# computes it (--compute-seg-if-missing), the rest reuse it.
 #
 # Usage:
-#   ./run_all.sh <version> <dataset1> [dataset2] ... [options]
-#
-# Options:
-#   --max-images N            Limit dataset images per experiment
-#   --fs-sizes K1 K2 ...      Few-shot K values to sweep (default: 1 4 7 10)
-#   --ref-images name1 ...    Priority reference names for few-shot.
-#                             If fewer than K, remaining are filled
-#                             alphabetically from data/few_shot/{dataset}/.
-#   --fs-configs cfg1 ...     Override the default few-shot config list.
-#                             Useful to run a single baseline as its own
-#                             version without the full ablation suite.
-#   --unsup-configs cfg1 ...  Override the default unsupervised config list.
-#   --override KEY=VAL ...    Config overrides forwarded to main.py
-#   --skip-unsup              Skip unsupervised experiments
-#   --skip-fewshot            Skip few-shot experiments
-#   --skip-eval               Skip evaluation step
-#   --skip-plots              Skip plot generation
-#
-# Examples:
-#   # Basic: sweep all configs on one dataset
-#   ./run_all.sh v1 XRayNicoSent/images
-#
-#   # Run only the few-shot baseline as its own version
-#   ./run_all.sh v0_baseline_fs XRayNicoSent/images \
-#       --skip-unsup \
-#       --fs-configs configs/experiments/fs_baseline.yaml \
-#       --fs-sizes 1 5 10
-#
-#   # Quick test with 10 images
-#   ./run_all.sh v_test XRayNicoSent/images --max-images 10 --fs-sizes 1 2
-#
+#   ./run_experiments.sh                       # full suite, full dataset
+#   ./run_experiments.sh --no-embeddings       # skip embedding versions
+#   ./run_experiments.sh --max 20              # smoke test on 20 images/dataset
 # ============================================================================
+set -euo pipefail
 
-PROJECT_ROOT="${PROJECT_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-source "${PROJECT_ROOT}/venv/bin/activate"
-export LD_LIBRARY_PATH="${PROJECT_ROOT}/venv/lib/python3.13/site-packages/nvidia/cu13/lib:${LD_LIBRARY_PATH}"
+# ── Environment (tolerant: skip if the venv layout differs) ─────────────────
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "${PROJECT_ROOT}/venv/bin/activate" ]]; then
+    source "${PROJECT_ROOT}/venv/bin/activate"
+    export LD_LIBRARY_PATH="${PROJECT_ROOT}/venv/lib/python3.13/site-packages/nvidia/cu13/lib:${LD_LIBRARY_PATH:-}"
+fi
 
-# ── Parse version + init ─────────────────────────────────────────────────────
-
-VERSION=${1:?"Usage: ./run_all.sh <version> <dataset1> [dataset2] ... [options]"}
-shift 1
-
-DATASETS=()
+# ── CLI ─────────────────────────────────────────────────────────────────────
+WITH_EMBEDDINGS=true
 MAX_IMAGES=""
-FS_SIZES=()
-REF_IMAGES=()
-OVERRIDES=()
-SKIP_UNSUP=false
-SKIP_FEWSHOT=false
-SKIP_EVAL=false
-SKIP_PLOTS=false
-
-# ── Config lists (defaults; can be overridden by --*-configs flags) ─────────
-# These MUST be declared BEFORE the arg parser so that --fs-configs (etc.)
-# can override them without being clobbered afterwards.
-
-UNSUPERVISED_CONFIGS=(
-    configs/experiments/unsup_baseline.yaml
-    configs/experiments/unsup_hdbscan.yaml
-    configs/experiments/unsup_hdbscan_propagation.yaml
-    configs/experiments/unsup_hdbscan_propagation_iter.yaml
-)
-
-FEW_SHOT_CONFIGS=(
-    configs/experiments/fs_baseline.yaml
-    configs/experiments/fs_propagation.yaml
-    configs/experiments/fs_propagation_iter.yaml
-)
-
-
-# ── Arg parsing ──────────────────────────────────────────────────────────────
-
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --max-images)
-            MAX_IMAGES="$2"
-            shift 2
-            ;;
-        --fs-sizes)
-            shift
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                FS_SIZES+=("$1")
-                shift
-            done
-            ;;
-        --ref-images)
-            shift
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                REF_IMAGES+=("$1")
-                shift
-            done
-            ;;
-        --override)
-            shift
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                OVERRIDES+=("$1")
-                shift
-            done
-            ;;
-        --fs-configs)
-            shift
-            FEW_SHOT_CONFIGS=()
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                FEW_SHOT_CONFIGS+=("$1")
-                shift
-            done
-            ;;
-        --unsup-configs)
-            shift
-            UNSUPERVISED_CONFIGS=()
-            while [[ $# -gt 0 && ! "$1" =~ ^-- ]]; do
-                UNSUPERVISED_CONFIGS+=("$1")
-                shift
-            done
-            ;;
-        --skip-unsup)
-            SKIP_UNSUP=true
-            shift
-            ;;
-        --skip-fewshot)
-            SKIP_FEWSHOT=true
-            shift
-            ;;
-        --skip-eval)
-            SKIP_EVAL=true
-            shift
-            ;;
-        --skip-plots)
-            SKIP_PLOTS=true
-            shift
-            ;;
-        *)
-            DATASETS+=("$1")
-            shift
-            ;;
+        --no-embeddings) WITH_EMBEDDINGS=false; shift ;;
+        --max)           MAX_IMAGES="$2"; shift 2 ;;
+        *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
 done
+MAX_ARGS=()
+[[ -n "$MAX_IMAGES" ]] && MAX_ARGS=(--max-images "$MAX_IMAGES")
 
-# Defaults
-if [ ${#DATASETS[@]} -eq 0 ]; then
-    echo "Error: at least one dataset required"
-    echo "Usage: ./run_all.sh <version> <dataset1> [dataset2] ... [options]"
-    exit 1
+# ── Layout ──────────────────────────────────────────────────────────────────
+RESULTS_ROOT="results"
+SEG_CACHE="${RESULTS_ROOT}/_segmentation"
+
+# Datasets: <path under data/raw & data/processed>  +  <output label>.
+DS_PATHS=(Sunnybrook XRay)
+DS_LABELS=(Sunnybrook XRay)
+
+# Few-shot reference counts.
+FS_K=(1 3 5)
+
+# ── Feature sets ────────────────────────────────────────────────────────────
+# 'moments' version: the 13-moment set = all 16 moments minus ecc, hu1, hu2
+# (the rotation-sensitive redundant descriptors).
+MOMENTS_FEATURES="V,Cx,Cy,Dx,Dy,L,solidity,extent,compact,hu0,intensity_mean,intensity_std"
+
+# ── Shared overrides ────────────────────────────────────────────────────────
+# Segmenter params (part of the segmentation cache key -> keep identical).
+COMMON_OVR=(
+    "segmenter.grid_side=6"
+    "segmenter.score_threshold=0.5"
+    "segmenter.iou_threshold=0.5"
+)
+
+# HDBSCAN: leaf selection + tuned fractions.
+HDBSCAN_OVR=(
+    "labeler.hdbscan.cluster_selection_method=leaf"
+    "labeler.hdbscan.min_cluster_size_fraction=0.15"
+    "labeler.hdbscan.min_samples_fraction=0.03"
+)
+
+# Prototype propagation: tuned thresholds + SAM-weighted prototype selection
+# (preserved from the best Sunnybrook config).
+PROP_OVR=(
+    "propagation.references_per_cluster=5"
+    "propagation.quality.min_image_frequency=0.2"
+    "propagation.quality.min_avg_labeling_confidence=0.5"
+    "propagation.quality.min_avg_sam_confidence=0.6"
+    "propagation.mask_selection.sam_score_weight=0.8"
+    "propagation.mask_selection.min_combined_score=0.5"
+)
+
+# Feature versions on the unsupervised axis.
+FEATURE_VERSIONS=(moments)
+if [[ "$WITH_EMBEDDINGS" == true ]]; then
+    FEATURE_VERSIONS+=(embeddings_red embeddings_raw emb_momentos)
 fi
 
-if [ ${#FS_SIZES[@]} -eq 0 ]; then
-    FS_SIZES=(1 4 7 10)
-fi
+# Few-shot reference image stems per dataset and K (verified to contain all
+# annotated organs).
+declare -A REFS_1 REFS_3 REFS_5
+REFS_1[XRay]="100469495785351489872749036114751610212_rfyvv7"
+REFS_3[XRay]="100469495785351489872749036114751610212_rfyvv7 10155709300728342918543955138521808206_f7cj92 10287653421930576798556842610982533460_vpbhw6"
+REFS_5[XRay]="100469495785351489872749036114751610212_rfyvv7 10155709300728342918543955138521808206_f7cj92 10287653421930576798556842610982533460_vpbhw6 103416378058309979932405295235813040436_1g2pmw 10383960670432673238945376919735423432_hd3moq"
+REFS_1[Sunnybrook]="SCD0000101_IM_0003_0059"
+REFS_3[Sunnybrook]="SCD0000101_IM_0003_0059 SCD0000101_IM_0003_0079 SCD0000101_IM_0003_0099"
+REFS_5[Sunnybrook]="SCD0000101_IM_0003_0059 SCD0000101_IM_0003_0079 SCD0000101_IM_0003_0099 SCD0000101_IM_0003_0119 SCD0000101_IM_0003_0139"
 
-# ── Display configuration ───────────────────────────────────────────────────
-
-echo ""
-echo "############################################################"
-echo "  Experiment Suite: ${VERSION}"
-echo "  $(date)"
-echo "############################################################"
-echo "  Datasets:        ${DATASETS[*]}"
-echo "  Max images:      ${MAX_IMAGES:-all}"
-echo "  FS sizes (K):    ${FS_SIZES[*]}"
-echo "  Ref images:      ${REF_IMAGES[*]:-auto-discover}"
-echo "  Overrides:       ${OVERRIDES[*]:-none}"
-echo "  Unsup configs:   ${UNSUPERVISED_CONFIGS[*]}"
-echo "  FS configs:      ${FEW_SHOT_CONFIGS[*]}"
-echo "  Skip unsup:      ${SKIP_UNSUP}"
-echo "  Skip fewshot:    ${SKIP_FEWSHOT}"
-echo "############################################################"
-
-# ── Helper functions ─────────────────────────────────────────────────────────
-
-run_experiment() {
-    local cfg="$1"
-    local matching="$2"
-    local dataset="$3"
-    shift 3
-    local extra_args=("$@")
-
-    local dataset_short="${dataset%%/*}"
-    local results_base="results/${VERSION}/${dataset_short}"
-    local gt_dir="data/processed/${dataset_short}/masks"
-
-    # Build experiment name from config + optional K suffix
-    local exp_name
-    exp_name=$(basename "$cfg" .yaml)
-
-    local num_refs=""
-    for i in "${!extra_args[@]}"; do
-        if [[ "${extra_args[$i]}" == "--num-refs" ]]; then
-            num_refs="${extra_args[$((i+1))]}"
-            exp_name="${exp_name}_${num_refs}ref"
-            break
-        fi
-    done
-
-    local results_dir="${results_base}/${exp_name}"
-
-    echo ""
-    echo "============================================================"
-    echo "  Experiment: ${exp_name}"
-    echo "  Config:     ${cfg}"
-    echo "  Dataset:    ${dataset}"
-    echo "  Output:     ${results_dir}"
-    if [ -n "$num_refs" ]; then
-        echo "  Num refs:   ${num_refs}"
-    fi
-    echo "  $(date)"
-    echo "============================================================"
-
-    python -m main \
-        --config "$cfg" \
-        --dataset "$dataset" \
-        --output-dir "$results_dir" \
-        ${MAX_IMAGES:+--max-images "$MAX_IMAGES"} \
-        ${OVERRIDES:+--override "${OVERRIDES[@]}"} \
-        "${extra_args[@]}" \
-        2>&1 | tee "${results_base}/${exp_name}.log"
-
-    if [ "$SKIP_EVAL" = false ]; then
-        if [ -d "${results_dir}/masks" ] && [ -d "$gt_dir" ]; then
-            echo ""
-            echo "  Evaluating: ${exp_name} (matching=${matching})"
-            echo "  ----------------------------------------------"
-            python evaluate.py \
-                --gt "$gt_dir" \
-                --pred "${results_dir}/masks" \
-                --output "$results_dir" \
-                --matching "$matching" \
-                2>&1 | tee -a "${results_base}/${exp_name}.log"
-        else
-            echo "  [SKIP] Evaluation: masks or GT directory not found"
-        fi
-    fi
+# ── Helpers ─────────────────────────────────────────────────────────────────
+set_version_overrides() {  # populates the global VER_OVR array
+    case "$1" in
+        moments)
+            VER_OVR=("labeler.standardize=true"
+                     "extractor.features=${MOMENTS_FEATURES}"
+                     "labeler.features=${MOMENTS_FEATURES}"
+                     "labeler.embedding.enabled=false") ;;
+        embeddings_red)
+            VER_OVR=("labeler.standardize=true"
+                     "labeler.features=null"
+                     "labeler.embedding.enabled=true"
+                     "labeler.embedding.reduction=pca"
+                     "labeler.embedding.n_components=16") ;;
+        embeddings_raw)
+            VER_OVR=("labeler.standardize=true"
+                     "labeler.features=null"
+                     "labeler.embedding.enabled=true"
+                     "labeler.embedding.reduction=none") ;;
+        emb_momentos)
+            VER_OVR=("labeler.standardize=true"
+                     "extractor.features=${MOMENTS_FEATURES}"
+                     "labeler.features=${MOMENTS_FEATURES}"
+                     "labeler.embedding.enabled=true"
+                     "labeler.embedding.reduction=pca"
+                     "labeler.embedding.n_components=16") ;;
+        *) echo "Unknown version: $1" >&2; exit 1 ;;
+    esac
 }
 
-# ── Main loop ────────────────────────────────────────────────────────────────
-
-for dataset in "${DATASETS[@]}"; do
-    dataset_short="${dataset%%/*}"
-    results_base="results/${VERSION}/${dataset_short}"
-    mkdir -p "$results_base"
-    cp -r configs/experiments/ "$results_base/configs_used/"
+# run_and_eval <out_dir> <config> <ds_path> <matching> [extra main args...]
+# Reads the global RUN_OVR array for the --override list.
+run_and_eval() {
+    local out="$1" config="$2" ds_path="$3" matching="$4"; shift 4
+    local extra=("$@")
+    mkdir -p "$(dirname "$out")"
 
     echo ""
-    echo "############################################################"
-    echo "  Dataset: ${dataset}"
-    echo "############################################################"
+    echo "── RUN  ${out}   ($(date '+%H:%M:%S'))"
+    python -m main \
+        --config "$config" \
+        --dataset "${ds_path}/images" \
+        --output-dir "$out" \
+        --seg-cache-dir "$SEG_CACHE" \
+        --compute-seg-if-missing \
+        ${MAX_ARGS[@]+"${MAX_ARGS[@]}"} \
+        ${extra[@]+"${extra[@]}"} \
+        --override "${RUN_OVR[@]}"
 
-    # ── Unsupervised (hungarian matching, no refs) ────────────────────────
-    if [ "$SKIP_UNSUP" = false ]; then
-        echo ""
-        echo "  ── Unsupervised experiments ──"
-        for cfg in "${UNSUPERVISED_CONFIGS[@]}"; do
-            run_experiment "$cfg" "hungarian" "$dataset"
-        done
-    fi
+    echo "── EVAL ${out}   (matching=${matching})"
+    python evaluate.py \
+        --gt "data/processed/${ds_path}/masks" \
+        --pred "${out}/masks" \
+        --output "$out" \
+        --matching "$matching"
+}
 
-    # ── Few-shot (semantic matching, sweep over K) ────────────────────────
-    if [ "$SKIP_FEWSHOT" = false ]; then
-        echo ""
-        echo "  ── Few-shot experiments (K sweep: ${FS_SIZES[*]}) ──"
-        for K in "${FS_SIZES[@]}"; do
-            for cfg in "${FEW_SHOT_CONFIGS[@]}"; do
-                if [ ${#REF_IMAGES[@]} -gt 0 ]; then
-                    run_experiment "$cfg" "semantic" "$dataset" \
-                        --num-refs "$K" \
-                        --ref-images "${REF_IMAGES[@]}"
-                else
-                    run_experiment "$cfg" "semantic" "$dataset" \
-                        --num-refs "$K"
-                fi
-            done
-        done
-    fi
+# Baseline (raw grid) + the two unsupervised propagation configs x versions.
+run_unsup_for_dataset() {  # <ds_path> <ds_label>
+    local DS="$1" LBL="$2"
 
+    RUN_OVR=("${COMMON_OVR[@]}")
+    run_and_eval "${RESULTS_ROOT}/baseline/${LBL}/unsup_baseline" \
+        configs/experiments/unsup_baseline.yaml "$DS" hungarian
 
-    # ── Plots ─────────────────────────────────────────────────────────────
-    if [ "$SKIP_PLOTS" = false ]; then
-        echo ""
-        echo "============================================================"
-        echo "  Generating plots for ${dataset_short}"
-        echo "============================================================"
-        python plot_results.py \
-            --results_dir "$results_base" \
-            --output "${results_base}/plots/"
-    fi
+    for V in "${FEATURE_VERSIONS[@]}"; do
+        set_version_overrides "$V"
+        RUN_OVR=("${VER_OVR[@]}" "${HDBSCAN_OVR[@]}" "${PROP_OVR[@]}" "${COMMON_OVR[@]}")
+
+        run_and_eval "${RESULTS_ROOT}/${V}/${LBL}/unsup_hdbscan_propagation" \
+            configs/experiments/unsup_hdbscan_propagation.yaml "$DS" hungarian
+
+        run_and_eval "${RESULTS_ROOT}/${V}/${LBL}/unsup_hdbscan_propagation_iter" \
+            configs/experiments/unsup_hdbscan_propagation_iter.yaml "$DS" hungarian
+    done
+}
+
+# Few-shot: independent + iterative propagation, swept over K. Once -> fs_propagation.
+run_fewshot_for_dataset() {  # <ds_path> <ds_label>
+    local DS="$1" LBL="$2"
+    RUN_OVR=("${COMMON_OVR[@]}")
+
+    for K in "${FS_K[@]}"; do
+        case "$K" in
+            1) REFS="${REFS_1[$DS]}" ;;
+            3) REFS="${REFS_3[$DS]}" ;;
+            5) REFS="${REFS_5[$DS]}" ;;
+        esac
+
+        run_and_eval "${RESULTS_ROOT}/fs_propagation/${LBL}/fs_indep_${K}ref" \
+            configs/experiments/fs_propagation.yaml "$DS" semantic \
+            --num-refs "$K" --ref-images $REFS
+
+        run_and_eval "${RESULTS_ROOT}/fs_propagation/${LBL}/fs_iter_${K}ref" \
+            configs/experiments/fs_propagation_iter.yaml "$DS" semantic \
+            --num-refs "$K" --ref-images $REFS
+    done
+}
+
+# ── Run ─────────────────────────────────────────────────────────────────────
+echo "############################################################"
+echo "  Experiment catalog   embeddings=${WITH_EMBEDDINGS}   max=${MAX_IMAGES:-all}"
+echo "  Feature versions: ${FEATURE_VERSIONS[*]}"
+echo "  Datasets:         ${DS_LABELS[*]}"
+echo "  Moments set (13): ${MOMENTS_FEATURES}"
+echo "  $(date)"
+echo "############################################################"
+
+for i in "${!DS_PATHS[@]}"; do
+    run_unsup_for_dataset    "${DS_PATHS[$i]}" "${DS_LABELS[$i]}"
+    run_fewshot_for_dataset  "${DS_PATHS[$i]}" "${DS_LABELS[$i]}"
 done
 
 echo ""
 echo "############################################################"
 echo "  All experiments finished at $(date)"
-echo "  Results saved in: results/${VERSION}/"
+echo "  Results under ${RESULTS_ROOT}/"
 echo "############################################################"
