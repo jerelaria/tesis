@@ -21,21 +21,26 @@ High noise fractions do NOT invalidate the metric: the stability score
 measures reproducibility of the cluster *core* — the objects HDBSCAN was
 confident enough to assign — not coverage or completeness. A tight,
 well-separated cluster surrounded by a large noise halo can still score
-near the bootstrap ceiling.
+near 1.0.
 
-Bootstrap ceiling
------------------
-A bootstrap resample of size n contains ≈ n·(1 − 1/e) ≈ 63% unique members.
-For a perfectly stable cluster the max-Jaccard therefore saturates at ≈ 0.63,
-not 1.0. Hennig's recommended thresholds (0.6 moderate, 0.75 high) are
-calibrated to this scale, not to a 0–1 range. A score of 0.62 indicates a
-highly stable cluster, not a mediocre one.
+In-bag Jaccard (0–1 scale)
+--------------------------
+A with-replacement resample of size n contains only ≈ n·(1 − 1/e) ≈ 63% of the
+unique objects. If the original cluster were compared as-is, the ≈37% that were
+never drawn would deflate the Jaccard even for a perfectly reproducible cluster,
+capping the score near 0.63. That 37% is absence by sampling, not instability.
+
+To avoid this, the original cluster is restricted to its in-bag members (the
+object_ids actually drawn into the resample) before intersecting with the
+bootstrap clusters. A perfectly reproducible cluster then scores Jaccard 1.0,
+while merges and splits stay penalised. This recovers the genuine 0–1 scale on
+which Hennig's thresholds (0.75 stable, 0.85 very stable) are calibrated.
 
 Output
 ------
   <output>/stability_<method>.json  — {cluster_id: {jaccard_mean, jaccard_std, n_objects}}
   <output>/stability_<method>.png   — bar chart with error bars,
-                                      dashed reference lines at 0.5 and 0.75
+                                      dashed reference lines at 0.75 and 0.85
 
 CPU-only. No GPU required.
 """
@@ -137,6 +142,11 @@ def bootstrap_stability(
 
         boot_labels = HDBSCAN(**hdbscan_kwargs).fit_predict(X_boot)
 
+        # Unique object_ids that were actually drawn into this resample.
+        # A with-replacement bootstrap contains only ≈63% of the unique
+        # objects; the rest are absent purely by sampling, not instability.
+        in_bag = set(ids_boot)
+
         # Bootstrap cluster sets: unique object_ids per cluster, noise excluded
         boot_sets: dict[int, set] = {}
         for cid in np.unique(boot_labels):
@@ -145,10 +155,21 @@ def bootstrap_stability(
             boot_sets[cid] = set(ids_boot[boot_labels == cid])
 
         for orig_cid, orig_set in orig_sets.items():
+            # Restrict the original cluster to its in-bag members before
+            # comparing. This removes the spurious "missing 37%" penalty so a
+            # perfectly reproducible cluster scores Jaccard 1.0; merges/splits
+            # are still penalised because foreign ids or missing in-bag
+            # coverage appear inside the resample.
+            restricted = orig_set & in_bag
+            if not restricted:
+                # None of this cluster's objects were drawn — the cluster is
+                # simply absent from the resample, so Jaccard is undefined.
+                # Skip rather than record a spurious 0.
+                continue
             if not boot_sets:
                 jaccards[orig_cid].append(0.0)
             else:
-                max_j = max(_jaccard(orig_set, bs) for bs in boot_sets.values())
+                max_j = max(_jaccard(restricted, bs) for bs in boot_sets.values())
                 jaccards[orig_cid].append(max_j)
 
     return jaccards
@@ -184,10 +205,10 @@ def _plot_stability(
 
     ax.bar(x, means, yerr=stds, capsize=4, color="steelblue", alpha=0.85,
            error_kw={"elinewidth": 1.5})
-    ax.axhline(0.75, color="green",  linestyle="--", linewidth=1.2,
-               label="0.75 — high stability")
-    ax.axhline(0.50, color="orange", linestyle="--", linewidth=1.2,
-               label="0.50 — moderate stability")
+    ax.axhline(0.85, color="green",  linestyle="--", linewidth=1.2,
+               label="0.85 — very stable")
+    ax.axhline(0.75, color="orange", linestyle="--", linewidth=1.2,
+               label="0.75 — stable")
 
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=25, ha="right")

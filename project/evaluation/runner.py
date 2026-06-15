@@ -20,7 +20,7 @@ from project.evaluation.io import (
     print_summary,
 )
 from project.evaluation.map import compute_map
-from project.evaluation.matching import match_semantic, match_hungarian
+from project.evaluation.matching import match_semantic, match_greedy
 
 # 1.0 is excluded from the fine IoU grid: at threshold=1.0 only pixel-perfect
 # predictions are TP, which is degenerate for real-world masks.
@@ -51,7 +51,7 @@ def evaluate(
         metrics. Below this threshold the GT is treated as not detected.
         Default 0.5.
     """
-    match_fn = match_semantic if matching == "semantic" else match_hungarian
+    match_fn = match_semantic if matching == "semantic" else match_greedy
 
     gt_stems = {d.name for d in gt_dir.iterdir() if d.is_dir()}
     pred_stems = {d.name for d in pred_dir.iterdir() if d.is_dir()}
@@ -188,8 +188,8 @@ def main() -> None:
                         help="Predicted masks directory (same structure)")
     parser.add_argument("--output", required=True,
                         help="Directory to save metrics.csv and summary.json")
-    parser.add_argument("--matching", default="hungarian",
-                        choices=["semantic", "hungarian"],
+    parser.add_argument("--matching", default="greedy",
+                        choices=["semantic", "greedy"],
                         help="Matching strategy for quality metrics")
     parser.add_argument(
         "--iou-thresholds", nargs="+", type=float,

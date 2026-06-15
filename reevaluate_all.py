@@ -42,7 +42,7 @@ Override with --dataset-gt.
 Matching strategy
 -----------------
 Auto-detected from the experiment name prefix:
-    unsup_*  ->  hungarian
+    unsup_*  ->  greedy
     all else ->  semantic
 Override with --matching.
 """
@@ -66,7 +66,7 @@ _DEFAULT_IOU_THRESHOLDS = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.75, 0.8, 0.9]
 
 def _auto_matching(exp_name: str) -> str:
     """Infer matching strategy from experiment name prefix."""
-    return "hungarian" if exp_name.startswith("unsup_") else "semantic"
+    return "greedy" if exp_name.startswith("unsup_") else "semantic"
 
 
 def main() -> None:
@@ -109,9 +109,9 @@ def main() -> None:
         help="IoU thresholds at which to report P/R/F1 coverage metrics.",
     )
     parser.add_argument(
-        "--matching", default=None, choices=["semantic", "hungarian"],
+        "--matching", default=None, choices=["semantic", "greedy"],
         help="Override matching strategy for all experiments. Default: "
-             "auto-detect from experiment name (unsup_* -> hungarian, "
+             "auto-detect from experiment name (unsup_* -> greedy, "
              "all others -> semantic).",
     )
     parser.add_argument(

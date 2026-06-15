@@ -2,7 +2,7 @@
 import numpy as np
 import pytest
 from project.evaluation.metrics_paired import dice_score, iou_score
-from project.evaluation.matching import match_semantic, match_hungarian
+from project.evaluation.matching import match_semantic, match_greedy
 
 
 # ---------------------------------------------------------------------------
@@ -84,18 +84,16 @@ def test_match_semantic_missing_organ():
 
 
 # ---------------------------------------------------------------------------
-# match_hungarian
+# match_greedy
 # ---------------------------------------------------------------------------
 
-def test_match_hungarian_prefers_high_iou():
+def test_match_greedy_prefers_high_iou():
     """
-    2 GT, 2 pred with cross-IoU matrix:
-        pred_A  pred_B
-    gt_1  0.3    0.7
-    gt_2  0.6    0.2
+    2 GT, 2 pred. pred_B is identical to gt_1 (IoU 1.0) and pred_A is identical
+    to gt_2 (IoU 1.0); the cross pairs are lower (~0.73).
 
-    Optimal: gt_1->pred_B (0.7), gt_2->pred_A (0.6)  (sum=1.3)
-    Greedy (by column max): gt_1->pred_A? no — hungarian should find global optimum.
+    Greedy takes the highest-IoU pairs first: gt_1->pred_B, gt_2->pred_A. Each
+    GT keeps its best prediction and no prediction is claimed twice.
     """
     gt_1 = np.zeros((10, 10), dtype=bool)
     gt_1[0:7, 0:7] = True   # 49 px
@@ -114,7 +112,7 @@ def test_match_hungarian_prefers_high_iou():
     gt_masks   = {"gt_1": gt_1, "gt_2": gt_2}
     pred_masks = {"pred_A": pred_A, "pred_B": pred_B}
 
-    results = match_hungarian(pred_masks, gt_masks)
+    results = match_greedy(pred_masks, gt_masks)
 
     matching = {r["gt_name"]: r["pred_name"] for r in results}
     assert matching.get("gt_1") == "pred_B", f"gt_1 should match pred_B, got {matching}"

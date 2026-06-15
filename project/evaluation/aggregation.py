@@ -127,7 +127,7 @@ def add_panoptic_quality(summary: dict) -> None:
     standard IoU threshold.
 
     Per-organ RQ and PQ are set to None because ``f1@0.5`` is not available at
-    organ level: precision per organ is undefined in hungarian matching mode
+    organ level: precision per organ is undefined in greedy matching mode
     (predicted names are synthetic, so no per-organ cleanliness can be
     computed). Only recall is available per organ.
 
@@ -143,5 +143,5 @@ def add_panoptic_quality(summary: dict) -> None:
 
     for organ_data in summary["per_organ"].values():
         organ_data["sq"] = organ_data.get("iou_mean_detected_only")
-        organ_data["rq"] = None  # per-organ precision undefined in hungarian mode
+        organ_data["rq"] = None  # per-organ precision undefined in greedy mode
         organ_data["pq"] = None

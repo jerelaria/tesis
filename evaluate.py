@@ -6,7 +6,7 @@ Evaluate predicted masks against ground truth.
 Reports three families of metrics:
 
 1. Quality (Dice, IoU, HD95)
-   Computed via a matching strategy (semantic or hungarian).
+   Computed via a matching strategy (semantic or greedy).
    A matched pair whose IoU < --match-threshold (default 0.5) is demoted to
    missing: the GT contributes dice=0, iou=0, hd95=inf as if no prediction
    existed.  Pairs at or above the threshold are evaluated normally.
@@ -29,7 +29,7 @@ Why three families?
    Quality (Dice) mixes "how good is the match" with "how much do I miss".
    Coverage isolates the recall side. Cleanliness isolates the precision
    side. With all three, the matched-vs-missed-vs-junk story is fully
-   visible — Dice alone hides false positives (Hungarian discards extra
+   visible — Dice alone hides false positives (greedy matching discards extra
    predictions) and dilutes recall gains across many already-matched GT
    entries.
 
@@ -40,7 +40,7 @@ true positives, which is degenerate for real-world masks.
 
 Two matching strategies for the quality metrics:
 - semantic:  match by organ name (few-shot / text-guided modes).
-- hungarian: match by best IoU (unsupervised mode, where names are obj_N).
+- greedy:    match by best IoU (unsupervised mode, where names are obj_N).
 
 match_threshold (--match-threshold, default 0.5):
    IoU gate applied AFTER matching. A pair whose IoU is below this value

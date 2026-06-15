@@ -77,7 +77,7 @@ def aggregate_pr(
     Recall is computed both globally and per organ. Precision is computed
     only globally — per-organ precision would require knowing which
     prediction is "supposed to be" which organ, which is not well-defined
-    when names are synthetic (hungarian mode).
+    when names are synthetic (greedy mode).
 
     Returns
     -------

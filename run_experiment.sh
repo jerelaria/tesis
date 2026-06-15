@@ -51,9 +51,12 @@ MAX_ARGS=()
 RESULTS_ROOT="results"
 SEG_CACHE="${RESULTS_ROOT}/_segmentation"
 
+# Where to write the exported Sunnybrook (moments) prototypes for transfer to ACDC.
+EXPORT_REFS_DIR="/media/apoloml/DATOS_2/Tesis_Cosegmentacion/data/few_shot/prototypes_sunnybrook_to_acdc"
+
 # Datasets: <path under data/raw & data/processed>  +  <output label>.
-DS_PATHS=(Sunnybrook XRay)
-DS_LABELS=(Sunnybrook XRay)
+DS_PATHS=(Sunnybrook XRay ACDC)
+DS_LABELS=(Sunnybrook XRay ACDC)
 
 # Few-shot reference counts.
 FS_K=(1 3 5)
@@ -71,21 +74,15 @@ COMMON_OVR=(
     "segmenter.iou_threshold=0.5"
 )
 
-# HDBSCAN: leaf selection + tuned fractions.
-HDBSCAN_OVR=(
-    "labeler.hdbscan.cluster_selection_method=leaf"
-    "labeler.hdbscan.min_cluster_size_fraction=0.15"
-    "labeler.hdbscan.min_samples_fraction=0.03"
-)
+# HDBSCAN (leaf selection + tuned fractions) and the propagation quality
+# thresholds min_image_frequency / min_avg_sam_confidence now live in the base
+# configs (unsup_hdbscan_propagation*.yaml), so they are no longer overridden here.
 
 # Prototype propagation: tuned thresholds + SAM-weighted prototype selection
 # (preserved from the best Sunnybrook config).
 PROP_OVR=(
     "propagation.references_per_cluster=5"
-    "propagation.quality.min_image_frequency=0.2"
     "propagation.quality.min_avg_labeling_confidence=0.5"
-    "propagation.quality.min_avg_sam_confidence=0.6"
-    "propagation.mask_selection.sam_score_weight=0.8"
     "propagation.mask_selection.min_combined_score=0.5"
 )
 
@@ -172,7 +169,7 @@ run_unsup_for_dataset() {  # <ds_path> <ds_label>
 
     for V in "${FEATURE_VERSIONS[@]}"; do
         set_version_overrides "$V"
-        RUN_OVR=("${VER_OVR[@]}" "${HDBSCAN_OVR[@]}" "${PROP_OVR[@]}" "${COMMON_OVR[@]}")
+        RUN_OVR=("${VER_OVR[@]}" "${PROP_OVR[@]}" "${COMMON_OVR[@]}")
 
         run_and_eval "${RESULTS_ROOT}/${V}/${LBL}/unsup_hdbscan_propagation" \
             configs/experiments/unsup_hdbscan_propagation.yaml "$DS" hungarian
@@ -204,18 +201,51 @@ run_fewshot_for_dataset() {  # <ds_path> <ds_label>
     done
 }
 
+# Export references: build unsupervised prototypes (moments) on a dataset and
+# write them as a few-shot reference tree under EXPORT_REFS_DIR, then exit
+# (skips full-dataset propagation). The result is usable as the memory for a
+# few_shot run on another dataset (e.g. ACDC).
+run_export_refs() {  # <ds_path> <export_dir>
+    local DS="$1" OUT="$2"
+
+    set_version_overrides moments
+    RUN_OVR=("${VER_OVR[@]}" "${PROP_OVR[@]}" "${COMMON_OVR[@]}")
+
+    echo ""
+    echo "── EXPORT REFS  ${DS} (moments) -> ${OUT}   ($(date '+%H:%M:%S'))"
+    python -m main \
+        --config configs/experiments/unsup_hdbscan_propagation.yaml \
+        --dataset "${DS}/images" \
+        --output-dir "${RESULTS_ROOT}/_export_refs/${DS}" \
+        --seg-cache-dir "$SEG_CACHE" \
+        --compute-seg-if-missing \
+        ${MAX_ARGS[@]+"${MAX_ARGS[@]}"} \
+        --export-references "$OUT" \
+        --override "${RUN_OVR[@]}"
+}
+
 # ── Run ─────────────────────────────────────────────────────────────────────
 echo "############################################################"
 echo "  Experiment catalog   embeddings=${WITH_EMBEDDINGS}   max=${MAX_IMAGES:-all}"
 echo "  Feature versions: ${FEATURE_VERSIONS[*]}"
 echo "  Datasets:         ${DS_LABELS[*]}"
-echo "  Moments set (13): ${MOMENTS_FEATURES}"
+echo "  Moments set (12): ${MOMENTS_FEATURES}"
+echo "  Export refs:      Sunnybrook (moments) -> ${EXPORT_REFS_DIR}"
 echo "  $(date)"
 echo "############################################################"
 
+# Export Sunnybrook (moments) prototypes as a few-shot reference tree for ACDC.
+run_export_refs Sunnybrook "$EXPORT_REFS_DIR"
+
 for i in "${!DS_PATHS[@]}"; do
     run_unsup_for_dataset    "${DS_PATHS[$i]}" "${DS_LABELS[$i]}"
-    run_fewshot_for_dataset  "${DS_PATHS[$i]}" "${DS_LABELS[$i]}"
+    # Few-shot only for datasets with in-dataset references defined.
+    # ACDC has no REFS_* entries -> unsupervised only.
+    if [[ -n "${REFS_1[${DS_PATHS[$i]}]:-}" ]]; then
+        run_fewshot_for_dataset  "${DS_PATHS[$i]}" "${DS_LABELS[$i]}"
+    else
+        echo "── SKIP few-shot for ${DS_LABELS[$i]} (no references defined)"
+    fi
 done
 
 echo ""

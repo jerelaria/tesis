@@ -1,4 +1,4 @@
-"""Mask matching strategies: semantic (by organ name) and Hungarian (by IoU)."""
+"""Mask matching strategies: semantic (by organ name) and greedy (by IoU)."""
 
 import re
 import numpy as np
@@ -97,19 +97,22 @@ def match_semantic(
     return results
 
 
-def match_hungarian(
+def match_greedy(
     pred_masks: dict[str, np.ndarray],
     gt_masks: dict[str, np.ndarray],
     match_threshold: float = 0.5,
 ) -> list[dict]:
     """
-    Match predictions to GT using global Hungarian assignment on IoU.
+    Match predictions to GT greedily by IoU.
 
     Used for unsupervised mode where prediction names (e.g., obj_NNN) carry
-    no semantic meaning. Finds the best global GT-to-pred assignment.
+    no semantic meaning. Pairs are considered in descending IoU order: the
+    highest-IoU (gt, pred) pair above the threshold is matched first, and
+    both that GT and that prediction are removed from the pool. This prevents
+    two masks from claiming the same GT — the one with the higher IoU wins.
 
-    GT organs whose best-matched prediction has IoU < match_threshold are
-    treated as missing: pred_name=None, quality computed against an empty mask.
+    GT organs left with no above-threshold prediction are treated as missing:
+    pred_name=None, quality computed against an empty mask.
     """
     gt_list = list(gt_masks.items())
     pred_list = list(pred_masks.items())
@@ -124,31 +127,31 @@ def match_hungarian(
             for gt_name, gt_mask in gt_list
         ]
 
-    cost_matrix = np.zeros((len(gt_list), len(pred_list)))
+    # All candidate pairs whose IoU clears the threshold, sorted high -> low.
+    candidates: list[tuple[float, int, int]] = []
     for i, (_, gt_mask) in enumerate(gt_list):
         for j, (_, pred_mask) in enumerate(pred_list):
-            cost_matrix[i, j] = -iou_score(pred_mask, gt_mask)
+            iou = iou_score(pred_mask, gt_mask)
+            if iou >= match_threshold:
+                candidates.append((iou, i, j))
+    candidates.sort(reverse=True)
 
-    row_ind, col_ind = linear_sum_assignment(cost_matrix)
     results: list[dict] = []
     matched_gt: set[int] = set()
+    matched_pred: set[int] = set()
 
-    for i, j in zip(row_ind, col_ind):
+    for iou, i, j in candidates:
+        if i in matched_gt or j in matched_pred:
+            continue
         gt_name, gt_mask = gt_list[i]
         pred_name, pred_mask = pred_list[j]
-        organ = parse_organ_name(gt_name)
-
-        if -cost_matrix[i, j] >= match_threshold:
-            results.append({
-                "gt_name": gt_name, "pred_name": pred_name, "organ": organ,
-                **compute_quality_metrics(pred_mask, gt_mask),
-            })
-        else:
-            results.append({
-                "gt_name": gt_name, "pred_name": None, "organ": organ,
-                **compute_quality_metrics(np.zeros(gt_mask.shape, dtype=bool), gt_mask),
-            })
+        results.append({
+            "gt_name": gt_name, "pred_name": pred_name,
+            "organ": parse_organ_name(gt_name),
+            **compute_quality_metrics(pred_mask, gt_mask),
+        })
         matched_gt.add(i)
+        matched_pred.add(j)
 
     for i, (gt_name, gt_mask) in enumerate(gt_list):
         if i not in matched_gt:

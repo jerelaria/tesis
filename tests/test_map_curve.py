@@ -6,7 +6,7 @@ import pytest
 from PIL import Image
 from pathlib import Path
 
-from project.evaluation.matching import match_semantic, match_hungarian
+from project.evaluation.matching import match_semantic, match_greedy
 from project.evaluation.map import compute_average_precision, compute_map
 from project.evaluation.runner import evaluate
 
@@ -74,10 +74,10 @@ class TestMatchThresholdGate:
         )
         assert results[0]["iou"] == pytest.approx(0.0)
 
-    # --- hungarian ---
+    # --- greedy ---
 
-    def test_hungarian_below_threshold_is_missing(self):
-        results = match_hungarian(
+    def test_greedy_below_threshold_is_missing(self):
+        results = match_greedy(
             {"obj_001": self.PRED}, {"organ_1": self.GT},
             match_threshold=0.5,
         )
@@ -85,8 +85,8 @@ class TestMatchThresholdGate:
         assert results[0]["pred_name"] is None
         assert results[0]["dice"] == pytest.approx(0.0)
 
-    def test_hungarian_above_threshold_is_detected(self):
-        results = match_hungarian(
+    def test_greedy_above_threshold_is_detected(self):
+        results = match_greedy(
             {"obj_001": self.PRED}, {"organ_1": self.GT},
             match_threshold=0.3,
         )
@@ -96,7 +96,7 @@ class TestMatchThresholdGate:
 
     def test_default_threshold_is_0_5(self):
         # At default threshold=0.5, IoU≈0.324 is below threshold → missing
-        results_default = match_hungarian(
+        results_default = match_greedy(
             {"obj_001": self.PRED}, {"organ_1": self.GT},
         )
         assert results_default[0]["pred_name"] is None
@@ -104,7 +104,7 @@ class TestMatchThresholdGate:
     def test_exact_threshold_boundary(self):
         # threshold equals IoU → should be detected (>= not >)
         iou = _iou(self.GT, self.PRED)
-        results = match_hungarian(
+        results = match_greedy(
             {"obj_001": self.PRED}, {"organ_1": self.GT},
             match_threshold=float(iou),
         )
