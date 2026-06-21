@@ -30,13 +30,13 @@ Usage
 
     # Custom GT directories:
     python reevaluate_all.py \\
-        --dataset-gt XRayNicoSent:data/processed/XRayNicoSent/masks \\
-                     SunnybrookNicoSent:data/processed/SunnybrookNicoSent/masks
+        --dataset-gt XRay:data/processed/XRay/masks \\
+                     Sunnybrook:data/processed/Sunnybrook/masks
 
 Dataset-to-GT mapping
 ---------------------
 The script maps each dataset directory name to a GT masks directory. Defaults
-are provided for JSRT (XRayNicoSent) and Sunnybrook (SunnybrookNicoSent).
+are provided for JSRT (XRay) and Sunnybrook (Sunnybrook).
 Override with --dataset-gt.
 
 Matching strategy
@@ -56,8 +56,9 @@ from project.evaluation.io import save_results, print_summary
 
 # Default GT directory mapping: dataset_dir_name -> relative GT masks path
 _DATASET_GT_DEFAULTS: dict[str, str] = {
-    "XRayNicoSent":       "data/processed/XRayNicoSent/masks",
-    "SunnybrookNicoSent": "data/processed/SunnybrookNicoSent/masks",
+    "XRay":       "data/processed/XRay/masks",
+    "Sunnybrook": "data/processed/Sunnybrook/masks",
+    "ACDC":       "data/processed/ACDC/masks",
 }
 
 # 1.0 excluded: pixel-perfect threshold is degenerate for real-world masks
@@ -82,7 +83,7 @@ def main() -> None:
         "--dataset-gt", nargs="*",
         metavar="DATASET:GT_DIR",
         help="Dataset name to GT masks dir mapping, e.g. "
-             "XRayNicoSent:data/processed/XRayNicoSent/masks. "
+             "XRay:data/processed/XRay/masks. "
              f"Defaults: {_DATASET_GT_DEFAULTS}",
     )
     parser.add_argument(

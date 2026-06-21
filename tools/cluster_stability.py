@@ -84,6 +84,29 @@ def load_features(
     return X, object_ids
 
 
+def load_good_clusters(summary_path: Path) -> set[int] | None:
+    """
+    Read the set of *final* (non-filtered) cluster ids from the pipeline's
+    phase2_clustering/summary.json.
+
+    The pipeline drops low-quality clusters during phase 2 (e.g. too small or
+    rejected by the labeler) and records the survivors under "good_clusters".
+    Returns that set so reporting can be restricted to the clusters that
+    actually make it into the final partition, or None if the file/key is
+    unavailable (callers then fall back to reporting every cluster).
+    """
+    if not summary_path.exists():
+        return None
+    try:
+        summary = json.loads(summary_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return None
+    good = summary.get("good_clusters")
+    if good is None:
+        return None
+    return {int(c) for c in good}
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap stability (Hennig 2007)
 # ---------------------------------------------------------------------------
@@ -259,10 +282,17 @@ def main() -> None:
         "--output", type=Path, required=True,
         help="Directory to write stability_<method>.json and stability_<method>.png",
     )
+    parser.add_argument(
+        "--all-clusters", action="store_true",
+        help="Report every HDBSCAN cluster. By default the print and plot are "
+             "restricted to the final clusters (good_clusters in "
+             "phase2_clustering/summary.json), hiding clusters the pipeline filtered out.",
+    )
     args = parser.parse_args()
 
     run_dir = args.run_dir.resolve()
     features_csv = run_dir / "phase2_clustering" / "clustering_features.csv"
+    summary_path = run_dir / "phase2_clustering" / "summary.json"
     config_path  = run_dir / "resolved_config.json"
 
     for p in (features_csv, config_path):
@@ -322,7 +352,22 @@ def main() -> None:
             "n_objects":    int((original_labels == cid).sum()),
         }
 
-    _print_results(results)
+    # Restrict the printed table and the bar chart to the final clusters that
+    # survived phase-2 filtering. The full JSON below still records every
+    # cluster so nothing is lost. Pass --all-clusters to disable the filter.
+    display_results = results
+    if not args.all_clusters:
+        good = load_good_clusters(summary_path)
+        if good is None:
+            print("\n  [warn] good_clusters not found in summary.json; "
+                  "showing all clusters. Use --all-clusters to silence this.")
+        else:
+            display_results = {k: v for k, v in results.items() if int(k) in good}
+            filtered_out = sorted((int(k) for k in results if int(k) not in good))
+            print(f"\n  Final clusters: {sorted(int(k) for k in display_results)}  "
+                  f"|  filtered out (hidden): {filtered_out}")
+
+    _print_results(display_results)
 
     args.output.mkdir(parents=True, exist_ok=True)
 
@@ -345,7 +390,7 @@ def main() -> None:
         )
     print(f"\n  Saved: {json_path}")
 
-    _plot_stability(results, args.output / f"stability_{args.method}.png",
+    _plot_stability(display_results, args.output / f"stability_{args.method}.png",
                     args.method, args.n_bootstrap)
 
     print("\nDone.")

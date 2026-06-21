@@ -88,6 +88,7 @@ def collect_frame_results(
 ) -> list[SegmentedObject]:
     """Convert video predictor output for one frame into SegmentedObjects."""
     objects = []
+    native_h, native_w = source_image.volume.shape[:2]
     for pos, obj_id in enumerate(obj_ids):
         logits = video_res_masks[pos].cpu().numpy().squeeze()
         binary_mask = logits > 0.0
@@ -97,14 +98,34 @@ def collect_frame_results(
             logger.debug(f"[VIDEO] Empty mask for '{organ}', skipping")
             continue
 
+        # SAM2 interpolates every frame's output to a single resolution (the
+        # last frame loaded in the video session), so masks can come back at a
+        # size that does not match this frame's native dimensions. Resize back
+        # to the source image so downstream IoU / saving uses the right shape.
+        # Confidence is read from the original-resolution logits first.
+        confidence = logits_to_confidence(logits, binary_mask)
+        binary_mask = _resize_mask_to(binary_mask, native_h, native_w)
+
         objects.append(SegmentedObject(
             mask=binary_mask,
             source_image=source_image,
-            confidence=logits_to_confidence(logits, binary_mask),
+            confidence=confidence,
             label=organ_names_by_obj_id.get(obj_id, "unknown"),
         ))
 
     return objects
+
+
+def _resize_mask_to(mask: np.ndarray, height: int, width: int) -> np.ndarray:
+    """Nearest-neighbor resize of a boolean mask to (height, width)."""
+    if mask.shape == (height, width):
+        return mask
+    from PIL import Image as PILImage
+
+    resized = PILImage.fromarray(mask.astype(np.uint8) * 255, mode="L").resize(
+        (width, height), resample=PILImage.NEAREST
+    )
+    return np.array(resized) > 127
 
 
 def logits_to_confidence(logits: np.ndarray, binary_mask: np.ndarray) -> float:

@@ -205,6 +205,7 @@ def _draw_lines_subplot(
     colors: dict[str, tuple],
     ref_lines: dict[str, float],
     ylabel: str,
+    ylim: tuple[float, float],
 ) -> None:
     for organ in all_organs:
         pairs = [(k, k_data[k][organ]) for k in all_k if organ in k_data.get(k, {})]
@@ -217,7 +218,7 @@ def _draw_lines_subplot(
     ax.set_xlabel("K (number of reference frames)")
     _ref_hlines(ax, all_organs, ref_lines, colors)
     ax.set_ylabel(ylabel)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(*ylim)
     ax.grid(axis="y", alpha=0.3)
 
 
@@ -229,6 +230,7 @@ def _draw_bars_subplot(
     ref_lines: dict[str, float],
     ylabel: str,
     k: int,
+    ylim: tuple[float, float],
 ) -> None:
     present = [o for o in sorted(all_organs) if o in organ_dice]
     x = np.arange(len(present))
@@ -239,7 +241,7 @@ def _draw_bars_subplot(
     ax.set_xlabel(f"K = {k}")
     _ref_hlines(ax, present, ref_lines, colors)
     ax.set_ylabel(ylabel)
-    ax.set_ylim(0, 1.05)
+    ax.set_ylim(*ylim)
     ax.grid(axis="y", alpha=0.3)
 
 
@@ -250,6 +252,7 @@ def _fill_subplot(
     colors: dict[str, tuple],
     ref_lines: dict[str, float],
     ylabel: str,
+    ylim: tuple[float, float],
 ) -> None:
     if not k_data:
         ax.set_visible(False)
@@ -257,10 +260,35 @@ def _fill_subplot(
     all_k = sorted(k_data)
     if len(all_k) == 1:
         _draw_bars_subplot(ax, k_data[all_k[0]], all_organs, colors,
-                           ref_lines, ylabel, all_k[0])
+                           ref_lines, ylabel, all_k[0], ylim)
     else:
         _draw_lines_subplot(ax, all_k, k_data, all_organs, colors,
-                            ref_lines, ylabel)
+                            ref_lines, ylabel, ylim)
+
+
+def _compute_ylim(
+    data: dict[tuple[str, str | None], dict[int, dict[str, float]]],
+    ref_lines: dict[str, float],
+    pad: float = 0.05,
+) -> tuple[float, float]:
+    """Tight shared y-limits from all plotted Dice values (+ reference lines)."""
+    vals = [
+        v
+        for series_data in data.values()
+        for kd in series_data.values()
+        for v in kd.values()
+    ]
+    vals.extend(ref_lines.values())
+    if not vals:
+        return (0.0, 1.05)
+    lo, hi = min(vals), max(vals)
+    span = hi - lo
+    margin = pad if span == 0 else pad * span
+    lo = max(0.0, lo - margin)
+    hi = min(1.05, hi + margin)
+    if hi - lo < 1e-3:          # degenerate: give it some breathing room
+        lo, hi = max(0.0, lo - 0.05), min(1.05, hi + 0.05)
+    return (lo, hi)
 
 
 # ---------------------------------------------------------------------------
@@ -272,6 +300,7 @@ def build_figure(
     variant: str,
     ref_lines: dict[str, float],
     title: str,
+    ylim: tuple[float, float] | None = None,
 ) -> plt.Figure:
     """
     Assemble the full figure from loaded data.
@@ -294,6 +323,8 @@ def build_figure(
     colors = _organ_colors(all_organs)
     ylabel = ("Dice (detected only)"
               if variant == "detected_only" else "Dice (with missing)")
+    if ylim is None:
+        ylim = _compute_ylim(data, ref_lines)
 
     n_rows, n_cols = len(suffixes), len(modes)
     fig, axes = plt.subplots(n_rows, n_cols,
@@ -306,7 +337,7 @@ def build_figure(
             label = _MODE_LABELS[mode] + _SUFFIX_LABELS.get(suffix, f" ({suffix})")
             ax.set_title(label, fontsize=10, fontweight="bold")
             _fill_subplot(ax, data.get((mode, suffix), {}),
-                          all_organs, colors, ref_lines, ylabel)
+                          all_organs, colors, ref_lines, ylabel, ylim)
 
     # Figure-level legend: organ lines (solid) + reference lines (dashed)
     handles = [
@@ -361,6 +392,13 @@ def main() -> None:
             "(annotated as external context, not a strict threshold)"
         ),
     )
+    parser.add_argument(
+        "--ylim", nargs=2, type=float, default=None, metavar=("MIN", "MAX"),
+        help=(
+            "Fixed y-axis range, e.g. --ylim 0.5 1.0. "
+            "If omitted, limits are auto-fitted tightly to the data."
+        ),
+    )
     args = parser.parse_args()
 
     if not args.results_dir.is_dir():
@@ -378,7 +416,8 @@ def main() -> None:
     version  = args.results_dir.parent.name
     title    = f"Few-shot Dice vs K  |  {version}/{dataset}  |  {args.variant}"
 
-    fig = build_figure(data, args.variant, ref_lines, title)
+    ylim = tuple(args.ylim) if args.ylim is not None else None
+    fig = build_figure(data, args.variant, ref_lines, title, ylim)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.output, dpi=150, bbox_inches="tight")
