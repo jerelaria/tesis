@@ -16,10 +16,39 @@ from project.pipeline.propagator import PropagationConfig, PrototypePropagator
 from project.segmentation.quality import (
     compute_cluster_quality,
     select_prototypes,
+    suppress_overlapping_clusters,
 )
 from project.segmentation.utils import mask_iou
 
 logger = logging.getLogger(__name__)
+
+
+def _apply_cluster_nms(
+    prototypes: dict[int, list[LabeledObject]],
+    quality_report: dict[int, dict],
+    config: PropagationConfig,
+) -> tuple[dict[int, list[LabeledObject]], list[dict]]:
+    """Drop duplicate clusters (same organ) before propagation.
+
+    Runs cluster-level NMS over the selected prototypes and logs which clusters
+    were suppressed and by which survivor.  Returns the surviving prototypes and
+    the suppression report (empty when NMS is disabled or nothing overlaps).
+    """
+    cluster_sizes = {cid: quality_report[cid]["n_objects"] for cid in prototypes}
+    survivors, nms_report = suppress_overlapping_clusters(
+        prototypes, cluster_sizes, config.mask_selection, config.cluster_nms,
+    )
+    for entry in nms_report:
+        logger.info(
+            f"  NMS: cluster_{entry['cluster']} suppressed by "
+            f"cluster_{entry['suppressed_by']} (IoU={entry['iou']:.3f})"
+        )
+    if nms_report:
+        logger.info(
+            f"Cluster NMS suppressed {len(nms_report)} cluster(s); "
+            f"survivors={sorted(survivors)}"
+        )
+    return survivors, nms_report
 
 
 def build_fewshot_references(
@@ -126,6 +155,10 @@ def build_unsupervised_references(
     )
     for cid, p in sorted(prototypes.items()):
         logger.info(f"  cluster_{cid}: {len(p)} prototypes")
+
+    # Step 2b: cluster-level NMS — drop duplicate clusters of the same organ.
+    prototypes, _ = _apply_cluster_nms(prototypes, quality_report, config)
+    good_clusters = set(prototypes)
 
     # Step 3: build interleaved mono-organ reference frames
     # Order: [cid_a p0, cid_b p0, ..., cid_a p1, cid_b p1, ...]
@@ -403,6 +436,11 @@ def build_unsupervised_multiorgan_references(
         config.references_per_cluster,
         config.mask_selection,
     )
+
+    # Cluster-level NMS — drop duplicate clusters before the cross-fill so the
+    # same organ is never propagated under two cluster ids.
+    prototypes, _ = _apply_cluster_nms(prototypes, quality_report, config)
+    good_clusters = set(prototypes)
 
     # Derive natives, the unique pool of anchors, and mono-organ refs for filling.
     native_lookup: dict[tuple[Path, str], tuple[np.ndarray, float]] = {}

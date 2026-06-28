@@ -41,7 +41,11 @@ from project.pipeline.cache_key import (
 )
 from project.pipeline.phase2_debug import ClusteringDebugWriter
 from project.pipeline.propagator import PropagationConfig
-from project.segmentation.quality import compute_cluster_quality, select_prototypes
+from project.segmentation.quality import (
+    compute_cluster_quality,
+    select_prototypes,
+    suppress_overlapping_clusters,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -357,7 +361,32 @@ def main(args) -> None:
             logger.info(
                 f"  cluster_{cid}: FILTERED — {'; '.join(info['failed'])}"
             )
-    logger.info(f"Good clusters: {sorted(good_clusters)}")
+    logger.info(f"Quality-good clusters: {sorted(good_clusters)}")
+
+    # -----------------------------------------------------------------------
+    # Cluster-level NMS: drop duplicate clusters (same organ) before
+    # propagation, so the prototypes and memory below reflect exactly what
+    # would be propagated in the final phase.
+    # -----------------------------------------------------------------------
+    logger.info("=" * 60)
+    logger.info("Cluster NMS")
+    logger.info("=" * 60)
+    cluster_sizes = {cid: quality_report[cid]["n_objects"] for cid in prototypes}
+    prototypes, nms_report = suppress_overlapping_clusters(
+        prototypes, cluster_sizes, prop_cfg.mask_selection, prop_cfg.cluster_nms
+    )
+    if not prop_cfg.cluster_nms.enabled:
+        logger.info("  disabled")
+    elif not nms_report:
+        logger.info("  no overlapping clusters suppressed")
+    else:
+        for entry in nms_report:
+            logger.info(
+                f"  cluster_{entry['cluster']} suppressed by "
+                f"cluster_{entry['suppressed_by']} (IoU={entry['iou']:.3f})"
+            )
+    good_clusters = set(prototypes)
+    logger.info(f"Clusters to propagate: {sorted(good_clusters)}")
 
     # -----------------------------------------------------------------------
     # Log: prototypes

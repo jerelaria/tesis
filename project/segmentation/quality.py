@@ -6,6 +6,9 @@ This module provides:
    to decide which clusters represent real organs.
 2. MaskSelectionConfig / select_prototypes — select the top-K prototype masks
    per good cluster, ranked by combined score.
+3. ClusterNMSConfig / suppress_overlapping_clusters — cluster-level non-maximum
+   suppression that drops duplicate clusters of the same organ before
+   propagation.
 
 Combined score formula:
     combined_score = alpha * sam_score + (1 - alpha) * labeling_confidence
@@ -15,7 +18,27 @@ where alpha = MaskSelectionConfig.sam_score_weight.
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from project.core.data_types import LabeledObject
+from project.segmentation.utils import mask_iou
+
+
+def _resize_mask_to(mask: np.ndarray, shape: tuple[int, int]) -> np.ndarray:
+    """Nearest-neighbor resize of a boolean mask to ``shape`` = (height, width).
+
+    Mirrors project.segmentation.medsam2.video._resize_mask_to; kept local to
+    avoid importing the medsam2 stack just for a mask reshape.
+    """
+    if mask.shape == shape:
+        return mask
+    from PIL import Image as PILImage
+
+    height, width = shape
+    resized = PILImage.fromarray(mask.astype(np.uint8) * 255, mode="L").resize(
+        (width, height), resample=PILImage.NEAREST
+    )
+    return np.array(resized) > 127
 
 
 @dataclass
@@ -23,6 +46,14 @@ class MaskSelectionConfig:
     """Configuration for prototype selection and reference mask scoring."""
     sam_score_weight: float = 0.5     # alpha: weight for SAM confidence
     min_combined_score: float = 0.75  # minimum score to qualify as a prototype
+
+
+@dataclass
+class ClusterNMSConfig:
+    """Configuration for cluster-level non-maximum suppression over prototypes."""
+    enabled: bool = True
+    iou_threshold: float = 0.5   # IoU above which two cluster prototypes are
+                                 # treated as the same anatomical structure
 
 
 @dataclass
@@ -188,3 +219,121 @@ def select_prototypes(
         result[cid] = [obj for _, obj in scored[:k]]
 
     return result
+
+
+def _prototype_strength(obj: LabeledObject, alpha: float) -> float:
+    """Combined prototype score: alpha * sam_score + (1 - alpha) * lconf.
+
+    Identical to the score select_prototypes ranks candidates by, so the NMS
+    representative strength is consistent with prototype selection.
+    """
+    sam_score = obj.segmented_object.confidence or 0.0
+    return alpha * sam_score + (1.0 - alpha) * obj.labeling_confidence
+
+
+def suppress_overlapping_clusters(
+    prototypes: dict[int, list[LabeledObject]],
+    cluster_sizes: dict[int, int],
+    selection_config: MaskSelectionConfig,
+    nms_config: ClusterNMSConfig,
+) -> tuple[dict[int, list[LabeledObject]], list[dict]]:
+    """Greedy cluster-level NMS over prototype masks, run before propagation.
+
+    Over-segmentation produces several clusters that describe the same
+    anatomical structure.  This collapses them so the cluster->organ mapping is
+    consistent across every image: each cluster is represented by its top
+    prototype (index 0); the strongest representative survives and weaker
+    representatives whose mask overlaps it (IoU >= nms_config.iou_threshold) are
+    suppressed and never propagated.
+
+    Representative strength is the same combined score select_prototypes ranks
+    by, with alpha = selection_config.sam_score_weight:
+        strength = alpha * (sam_score or 0.0) + (1 - alpha) * labeling_confidence
+
+    Survivor criterion: clusters are visited in deterministic order — strength
+    descending, then cluster size descending, then cluster_id ascending — so the
+    strongest (and, on ties, largest then lowest-id) cluster of an overlapping
+    group is the one kept.  Clusters with an empty prototype list are not
+    candidates and pass through unchanged (they cannot duplicate anything).
+
+    Parameters
+    ----------
+    prototypes
+        Mapping cluster_id -> list of prototype objects (best-scored first), as
+        returned by select_prototypes.
+    cluster_sizes
+        Mapping cluster_id -> number of members, used as the tie-breaker.
+    selection_config
+        Provides sam_score_weight (alpha) for the strength score.
+    nms_config
+        Enable flag and IoU threshold.
+
+    Returns
+    -------
+    survivors : dict[int, list[LabeledObject]]
+        The input mapping with the suppressed clusters removed.
+    report : list[dict]
+        One entry per suppressed cluster, in suppression order:
+        {"cluster": int, "suppressed_by": int, "iou": float}.
+
+    Representatives from differently-sized source images (variable-resolution
+    datasets such as ACDC) are reconciled with a nearest-neighbor resize before
+    the overlap is measured, so the IoU is computed in a common frame.
+
+    Raises
+    ------
+    ValueError
+        If a representative mask is None.
+    """
+    if not nms_config.enabled:
+        return prototypes, []
+
+    alpha = selection_config.sam_score_weight
+
+    # Build a representative (top prototype) for every non-empty cluster.
+    reps: dict[int, tuple[float, int, np.ndarray]] = {}
+    for cid, proto_list in prototypes.items():
+        if not proto_list:
+            continue
+        mask = proto_list[0].segmented_object.mask
+        if mask is None:
+            raise ValueError(
+                f"cluster {cid}: representative prototype has no mask (None)."
+            )
+        strength = _prototype_strength(proto_list[0], alpha)
+        reps[cid] = (strength, cluster_sizes.get(cid, 0), np.asarray(mask, dtype=bool))
+
+    # Deterministic order: strength desc, size desc, cluster_id asc.
+    order = sorted(reps, key=lambda cid: (-reps[cid][0], -reps[cid][1], cid))
+
+    kept: list[int] = []
+    report: list[dict] = []
+    for cid in order:
+        mask = reps[cid][2]
+        for kept_id in kept:
+            kept_mask = reps[kept_id][2]
+            # Cluster representatives come from different source images, which on
+            # variable-resolution datasets (e.g. ACDC) may differ in shape. Bring
+            # the candidate into the kept mask's frame with a nearest-neighbor
+            # resize before measuring overlap — same reconciliation the pipeline
+            # already uses for cross-resolution masks (medsam2 _resize_mask_to).
+            cand_mask = (
+                mask if mask.shape == kept_mask.shape
+                else _resize_mask_to(mask, kept_mask.shape)
+            )
+            iou = mask_iou(cand_mask, kept_mask)
+            if iou >= nms_config.iou_threshold:
+                report.append(
+                    {"cluster": cid, "suppressed_by": kept_id, "iou": float(iou)}
+                )
+                break
+        else:
+            kept.append(cid)
+
+    suppressed_ids = {entry["cluster"] for entry in report}
+    survivors = {
+        cid: proto_list
+        for cid, proto_list in prototypes.items()
+        if cid not in suppressed_ids
+    }
+    return survivors, report
