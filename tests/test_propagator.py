@@ -25,11 +25,7 @@ from project.pipeline.reference_builder import (
     build_fewshot_references,
     build_unsupervised_references,
 )
-from project.segmentation.quality import (
-    ClusterNMSConfig,
-    ClusterQualityConfig,
-    MaskSelectionConfig,
-)
+from project.segmentation.quality import ClusterQualityConfig, MaskSelectionConfig
 
 H, W = 20, 20
 
@@ -175,9 +171,6 @@ def _permissive_config(k: int = 2) -> PropagationConfig:
             sam_score_weight=0.5,
             min_combined_score=0.0,
         ),
-        # These tests use identical full masks to count propagation calls;
-        # cluster-level NMS would collapse them, so disable it here.
-        cluster_nms=ClusterNMSConfig(enabled=False),
     )
 
 
@@ -522,8 +515,6 @@ def test_iterative_mode_calls_per_cluster_batch_once_per_cluster():
             sam_score_weight=0.5,
             min_combined_score=0.0,
         ),
-        # Identical full masks would be collapsed by NMS; disable it here.
-        cluster_nms=ClusterNMSConfig(enabled=False),
         mode="iterative",
     )
     target_paths = [Path(f"/tmp/tgt_{i}.png") for i in range(n_targets)]

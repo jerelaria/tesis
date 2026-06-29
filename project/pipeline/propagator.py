@@ -45,7 +45,6 @@ from project.core.data_types import LabeledObject, MedicalImage
 from project.core.interfaces import VideoSegmenter, ImageReader, Propagator
 from project.data_io.few_shot_reader import FewShotReference
 from project.segmentation.quality import (
-    ClusterNMSConfig,
     ClusterQualityConfig,
     MaskSelectionConfig,
 )
@@ -68,9 +67,6 @@ class PropagationConfig:
     mask_selection : MaskSelectionConfig
         Governs the combined_score formula (sam_score_weight) and the minimum
         score gate (min_combined_score) for prototype selection.
-    cluster_nms : ClusterNMSConfig
-        Cluster-level non-maximum suppression applied to the selected prototypes
-        before propagation, to drop duplicate clusters of the same organ.
     mode : str
         "independent" — one session per (cluster, target) pair (default).
         "iterative"   — one session per cluster spanning all N targets;
@@ -89,7 +85,6 @@ class PropagationConfig:
     references_per_cluster: int = 5
     quality: ClusterQualityConfig = field(default_factory=ClusterQualityConfig)
     mask_selection: MaskSelectionConfig = field(default_factory=MaskSelectionConfig)
-    cluster_nms: ClusterNMSConfig = field(default_factory=ClusterNMSConfig)
     mode: str = "independent"
     reference_mode: str = "monoorgan"
     debug_collect_reference_predictions: bool = False
@@ -99,8 +94,6 @@ class PropagationConfig:
             self.quality = ClusterQualityConfig(**self.quality)
         if isinstance(self.mask_selection, dict):
             self.mask_selection = MaskSelectionConfig(**self.mask_selection)
-        if isinstance(self.cluster_nms, dict):
-            self.cluster_nms = ClusterNMSConfig(**self.cluster_nms)
         if self.mode not in ("independent", "iterative"):
             raise ValueError(
                 f"PropagationConfig.mode must be 'independent' or 'iterative', "

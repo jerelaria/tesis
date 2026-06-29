@@ -29,7 +29,6 @@ from project.segmentation.quality import (
     compute_cluster_quality,
     identify_good_clusters,
     select_prototypes,
-    suppress_overlapping_clusters,
 )
 
 logger = logging.getLogger(__name__)
@@ -103,35 +102,19 @@ class ClusteringDebugWriter:
             k,
             propagation_config.mask_selection,
         )
-
-        # Cluster-level NMS: drop duplicate clusters of the same organ before
-        # propagation, so every output below (prototypes, memory, summary)
-        # reflects exactly what gets propagated.  Deterministic — mirrors the
-        # reference builder.  Suppressed clusters move to filtered_clusters/.
-        cluster_sizes = {cid: quality_report[cid]["n_objects"] for cid in prototypes}
-        prototypes, nms_report = suppress_overlapping_clusters(
-            prototypes, cluster_sizes,
-            propagation_config.mask_selection, propagation_config.cluster_nms,
-        )
-        nms_suppressed = {entry["cluster"]: entry for entry in nms_report}
-        good_clusters = set(prototypes)
         cluster_to_obj_id = {
             cid: i + 1 for i, cid in enumerate(sorted(good_clusters))
         }
 
         logger.info(
-            f"[DEBUG] Writing outputs for {len(good_clusters)} good clusters "
-            f"({len(nms_suppressed)} NMS-suppressed), "
-            f"{len(quality_report) - len(good_clusters) - len(nms_suppressed)} "
-            f"filtered, k={k}, {len(memory_composition)} reference frames"
+            f"[DEBUG] Writing outputs for {len(good_clusters)} good clusters, "
+            f"{len(quality_report) - len(good_clusters)} filtered, "
+            f"k={k}, {len(memory_composition)} reference frames"
         )
 
         self._write_prototypes(prototypes, cluster_to_obj_id, alpha, k)
         self._write_top10_debug(labeled_by_image_clustering, good_clusters, alpha)
-        self._write_filtered_clusters(
-            labeled_by_image_clustering, quality_report, alpha,
-            nms_suppressed=nms_suppressed,
-        )
+        self._write_filtered_clusters(labeled_by_image_clustering, quality_report, alpha)
         self._write_feature_violin(labeled_by_image_clustering, features_csv)
         self._write_memory_composition(
             memory_composition, propagation_config.reference_mode
@@ -146,8 +129,6 @@ class ClusteringDebugWriter:
             cluster_to_obj_id=cluster_to_obj_id,
             alpha=alpha,
             num_images=len(image_paths),
-            cluster_nms_config=propagation_config.cluster_nms,
-            cluster_nms_report=nms_report,
         )
 
     # ------------------------------------------------------------------
@@ -285,30 +266,20 @@ class ClusteringDebugWriter:
         quality_report: dict[int, dict],
         alpha: float,
         n_show: int = 6,
-        nms_suppressed: dict[int, dict] | None = None,
     ) -> None:
-        """Save a mask panel for each cluster removed before propagation.
-
-        Two reasons are rendered: clusters that failed the quality thresholds,
-        and clusters that passed quality but were suppressed by cluster-level
-        NMS as duplicates of a stronger cluster (nms_suppressed maps cluster_id
-        -> {"suppressed_by", "iou"})."""
-        nms_suppressed = nms_suppressed or {}
-        quality_filtered = {
+        """Save a mask panel for each cluster that was filtered out, with the
+        rejection reason in the figure title."""
+        filtered = {
             cid: info for cid, info in quality_report.items() if not info["good"]
         }
-        if not quality_filtered and not nms_suppressed:
+        if not filtered:
             return
 
         out_dir = self.phase2_dir / "filtered_clusters"
         out_dir.mkdir(exist_ok=True)
-        logger.info(
-            f"Filtered cluster panels "
-            f"({len(quality_filtered)} quality + {len(nms_suppressed)} NMS) "
-            f"-> filtered_clusters/"
-        )
+        logger.info(f"Filtered cluster panels ({len(filtered)}) -> filtered_clusters/")
 
-        def _panel(cid: int, suptitle: str, filename: str) -> None:
+        for cid, info in sorted(filtered.items()):
             scored = []
             for objs in labeled_by_image.values():
                 for obj in objs:
@@ -319,8 +290,9 @@ class ClusteringDebugWriter:
                     scored.append((score, obj))
             scored.sort(key=lambda x: -x[0])
             top = scored[:n_show]
+
             if not top:
-                return
+                continue
 
             entries = []
             for combined, obj in top:
@@ -330,28 +302,11 @@ class ClusteringDebugWriter:
                 area = int(seg.mask.sum())
                 title = f"{src_name}\ncombined={combined:.3f}  area={area}"
                 entries.append((img, seg.mask, cid, title))
-            save_mask_panel(entries, out_dir / filename, suptitle=suptitle)
 
-        for cid, entry in sorted(nms_suppressed.items()):
-            info = quality_report[cid]
-            _panel(
-                cid,
-                suptitle=(
-                    f"cluster_{cid}  [NMS-SUPPRESSED]\n"
-                    f"n={info['n_objects']}  "
-                    f"freq={info['image_frequency']:.3f}  "
-                    f"lconf={info['avg_labeling_confidence']:.3f}  "
-                    f"sam={info['avg_sam_confidence']}\n"
-                    f"Reason: duplicate of cluster_{entry['suppressed_by']} "
-                    f"(IoU={entry['iou']:.3f})"
-                ),
-                filename=f"cluster_{cid}_nms_suppressed.png",
-            )
-
-        for cid, info in sorted(quality_filtered.items()):
             reason_str = "\n".join(info["failed"])
-            _panel(
-                cid,
+            save_mask_panel(
+                entries,
+                out_dir / f"cluster_{cid}_filtered.png",
                 suptitle=(
                     f"cluster_{cid}  [FILTERED]\n"
                     f"n={info['n_objects']}  "
@@ -360,7 +315,7 @@ class ClusteringDebugWriter:
                     f"sam={info['avg_sam_confidence']}\n"
                     f"Reason: {reason_str}"
                 ),
-                filename=f"cluster_{cid}_filtered.png",
+                n_cols=min(n_show, 6),
             )
 
 
@@ -374,8 +329,6 @@ class ClusteringDebugWriter:
         cluster_to_obj_id,
         alpha,
         num_images,
-        cluster_nms_config,
-        cluster_nms_report,
     ):
         total_images = len(labeled_by_image_clustering)
 
@@ -430,11 +383,6 @@ class ClusteringDebugWriter:
                 for c in sorted(good_clusters)
             },
             "prototypes": proto_info,
-            "cluster_nms": {
-                "enabled": cluster_nms_config.enabled,
-                "iou_threshold": cluster_nms_config.iou_threshold,
-                "suppressed": cluster_nms_report,
-            },
         }
 
         out = self.phase2_dir / "summary.json"

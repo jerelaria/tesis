@@ -52,6 +52,7 @@ import yaml
 from project.core.logging_setup import setup_logging
 from project.core.data_types import LabeledObject
 from project.data_io.reader import MedicalImageReader
+from project.evaluation.cluster_map import parse_cluster_map
 from project.evaluation.io import save_results, print_summary
 from project.evaluation.runner import evaluate, _DEFAULT_IOU_THRESHOLDS
 from project.labeling.clustering import ClusteringLabeler, ClusteringConfig
@@ -67,36 +68,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 _DEFAULT_SEG_CACHE_DIR = _PROJECT_ROOT / "results" / "_segmentation"
 
 
-# ---------------------------------------------------------------------------
-# Cluster-map parsing
-# ---------------------------------------------------------------------------
-
-def parse_cluster_map(raw: str) -> dict[int, str]:
-    """Parse "0=rv_cavity 1=lv_cavity 2=myocardium" into {0: 'rv_cavity', ...}.
-
-    Raises ValueError on malformed entries.
-    """
-    result: dict[int, str] = {}
-    for token in raw.strip().split():
-        if "=" not in token:
-            raise ValueError(
-                f"Malformed cluster-map token: {token!r}. "
-                "Expected format: <int>=<organ_name>, e.g. '0=rv_cavity'."
-            )
-        lhs, rhs = token.split("=", 1)
-        try:
-            cid = int(lhs)
-        except ValueError:
-            raise ValueError(
-                f"Cluster ID must be an integer, got: {lhs!r} in token {token!r}"
-            )
-        organ = rhs.strip()
-        if not organ:
-            raise ValueError(f"Empty organ name in token: {token!r}")
-        result[cid] = organ
-    if not result:
-        raise ValueError("--cluster-map produced an empty mapping.")
-    return result
+# Cluster-map parsing lives in project.evaluation.cluster_map (parse_cluster_map).
 
 
 # ---------------------------------------------------------------------------

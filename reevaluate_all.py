@@ -52,6 +52,7 @@ from pathlib import Path
 
 from project.evaluation.runner import evaluate
 from project.evaluation.io import save_results, print_summary
+from project.evaluation.cluster_map import load_cluster_map
 
 
 # Default GT directory mapping: dataset_dir_name -> relative GT masks path
@@ -114,6 +115,17 @@ def main() -> None:
         help="Override matching strategy for all experiments. Default: "
              "auto-detect from experiment name (unsup_* -> greedy, "
              "all others -> semantic).",
+    )
+    parser.add_argument(
+        "--cluster-map-filename", default="cluster_map.json",
+        help="Per-experiment cluster-map file looked up in each experiment "
+             "directory. When present it relabels predictions and forces "
+             "semantic matching.",
+    )
+    parser.add_argument(
+        "--ignore-cluster-maps", action="store_true",
+        help="Ignore all per-experiment cluster_map.json files and fall back to "
+             "auto-detect / --matching (useful for debug and the pure baseline).",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
@@ -186,7 +198,19 @@ def main() -> None:
     n_ok = 0
     n_err = 0
     for version, dataset, exp, pred_dir, gt_dir, output_dir in triples:
-        matching = args.matching or _auto_matching(exp)
+        # A per-experiment cluster_map.json (next to masks/) relabels predictions
+        # and forces semantic matching; the baseline simply omits the file.
+        cluster_map = None
+        cmap_path = output_dir / args.cluster_map_filename
+        if not args.ignore_cluster_maps and cmap_path.exists():
+            cluster_map = load_cluster_map(cmap_path)
+            matching = "semantic"
+            if args.matching == "greedy":
+                print(f"  [WARN] experiment {exp}: --matching greedy ignored; "
+                      f"cluster_map forces semantic")
+            print(f"  experiment {exp}: applying cluster_map (semantic)")
+        else:
+            matching = args.matching or _auto_matching(exp)
         print(f"\nRe-evaluating {version}/{dataset}/{exp}"
               f" (matching={matching}, match_threshold={args.match_threshold})")
         try:
@@ -197,6 +221,7 @@ def main() -> None:
                 iou_thresholds=args.iou_thresholds,
                 compute_map_metric=True,
                 match_threshold=args.match_threshold,
+                cluster_map=cluster_map,
             )
             save_results(all_results, summary, output_dir)
             n_ok += 1

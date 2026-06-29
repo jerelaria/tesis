@@ -5,12 +5,10 @@ import numpy as np
 
 from project.core.data_types import MedicalImage, SegmentedObject, LabeledObject
 from project.segmentation.quality import (
-    ClusterNMSConfig,
     ClusterQualityConfig,
     MaskSelectionConfig,
     identify_good_clusters,
     select_prototypes,
-    suppress_overlapping_clusters,
 )
 
 
@@ -319,121 +317,3 @@ def test_identify_then_select_only_good_clusters():
     prototypes = select_prototypes(dataset, good, k=3, config=sel_cfg)
     assert set(prototypes.keys()) == {0}
     assert len(prototypes[0]) == 3
-
-
-# ---------------------------------------------------------------------------
-# suppress_overlapping_clusters — cluster-level NMS
-# ---------------------------------------------------------------------------
-
-# With sam_score_weight=0.5 and sam==lconf==strength, the combined score equals
-# `strength`, so these helpers give full control over each representative.
-_NMS_SEL = MaskSelectionConfig(sam_score_weight=0.5, min_combined_score=0.0)
-_NMS_CFG = ClusterNMSConfig(enabled=True, iou_threshold=0.5)
-
-
-def _proto(mask, strength: float) -> list[LabeledObject]:
-    """One-element prototype list with the given mask and combined strength."""
-    image = MedicalImage(
-        volume=np.zeros((2, 2, 3), dtype=np.float32),
-        modality="synthetic",
-        source_path="/tmp/x.png",
-    )
-    seg = SegmentedObject(mask=mask, source_image=image, confidence=strength)
-    obj = LabeledObject(
-        segmented_object=seg,
-        organ_id=0,
-        organ_name="c",
-        labeling_confidence=strength,
-        method_used="test",
-    )
-    return [obj]
-
-
-def _full(h: int = 4, w: int = 4) -> np.ndarray:
-    return np.ones((h, w), dtype=bool)
-
-
-def test_two_overlapping_clusters_weaker_suppressed():
-    """Overlapping prototypes: the weaker cluster is suppressed by the stronger."""
-    prototypes = {0: _proto(_full(), 0.9), 1: _proto(_full(), 0.5)}
-    survivors, report = suppress_overlapping_clusters(
-        prototypes, {0: 5, 1: 5}, _NMS_SEL, _NMS_CFG
-    )
-    assert set(survivors) == {0}
-    assert report == [{"cluster": 1, "suppressed_by": 0, "iou": 1.0}]
-
-
-def test_disjoint_clusters_both_kept():
-    """Non-overlapping prototypes both survive; report is empty."""
-    a = np.zeros((4, 4), dtype=bool); a[:2, :2] = True
-    b = np.zeros((4, 4), dtype=bool); b[2:, 2:] = True
-    prototypes = {0: _proto(a, 0.9), 1: _proto(b, 0.8)}
-    survivors, report = suppress_overlapping_clusters(
-        prototypes, {0: 1, 1: 1}, _NMS_SEL, _NMS_CFG
-    )
-    assert set(survivors) == {0, 1}
-    assert report == []
-
-
-def test_tie_is_deterministic():
-    """Equal strength → larger size wins; equal size → lower id wins."""
-    for _ in range(5):
-        prototypes = {0: _proto(_full(), 0.7), 1: _proto(_full(), 0.7)}
-        survivors, report = suppress_overlapping_clusters(
-            prototypes, {0: 3, 1: 9}, _NMS_SEL, _NMS_CFG
-        )
-        assert set(survivors) == {1}
-        assert report == [{"cluster": 0, "suppressed_by": 1, "iou": 1.0}]
-
-    for _ in range(5):
-        prototypes = {0: _proto(_full(), 0.7), 1: _proto(_full(), 0.7)}
-        survivors, report = suppress_overlapping_clusters(
-            prototypes, {0: 5, 1: 5}, _NMS_SEL, _NMS_CFG
-        )
-        assert set(survivors) == {0}
-        assert report == [{"cluster": 1, "suppressed_by": 0, "iou": 1.0}]
-
-
-def test_disabled_is_noop():
-    """enabled=False returns the prototypes unchanged and an empty report."""
-    prototypes = {0: _proto(_full(), 0.9), 1: _proto(_full(), 0.5)}
-    survivors, report = suppress_overlapping_clusters(
-        prototypes, {0: 5, 1: 5}, _NMS_SEL,
-        ClusterNMSConfig(enabled=False, iou_threshold=0.5),
-    )
-    assert survivors is prototypes
-    assert report == []
-
-
-def test_malformed_mask_none_raises():
-    """A None representative mask raises ValueError, not silent skip."""
-    prototypes = {0: _proto(None, 0.9)}
-    with pytest.raises(ValueError):
-        suppress_overlapping_clusters(prototypes, {0: 1}, _NMS_SEL, _NMS_CFG)
-
-
-def test_mismatched_shapes_reconciled_by_resize():
-    """Representatives of different shapes (variable-resolution datasets like
-    ACDC) are reconciled with a nearest-neighbor resize before the IoU instead
-    of raising: two full masks of different sizes overlap fully → weaker dropped."""
-    prototypes = {
-        0: _proto(np.ones((4, 4), dtype=bool), 0.9),
-        1: _proto(np.ones((3, 3), dtype=bool), 0.8),
-    }
-    survivors, report = suppress_overlapping_clusters(
-        prototypes, {0: 1, 1: 1}, _NMS_SEL, _NMS_CFG
-    )
-    assert set(survivors) == {0}
-    assert report == [{"cluster": 1, "suppressed_by": 0, "iou": 1.0}]
-
-
-def test_mismatched_shapes_disjoint_both_kept():
-    """Different-shape representatives that map to disjoint regions both survive."""
-    a = np.zeros((4, 4), dtype=bool); a[:2, :] = True          # top half
-    b = np.zeros((8, 8), dtype=bool); b[4:, :] = True          # bottom half
-    prototypes = {0: _proto(a, 0.9), 1: _proto(b, 0.8)}
-    survivors, report = suppress_overlapping_clusters(
-        prototypes, {0: 1, 1: 1}, _NMS_SEL, _NMS_CFG
-    )
-    assert set(survivors) == {0, 1}
-    assert report == []

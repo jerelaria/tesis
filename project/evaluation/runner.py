@@ -8,9 +8,15 @@ computation, aggregation, and result saving across all image directories.
 """
 
 import argparse
+import logging
 from pathlib import Path
 
 from project.evaluation.aggregation import aggregate_quality, add_panoptic_quality
+from project.evaluation.cluster_map import (
+    DISCARD_LABEL,
+    parse_cluster_map,
+    relabel_predictions,
+)
 from project.evaluation.conflict_resolution import resolve_overlaps
 from project.evaluation.coverage import compute_pr_counts, aggregate_pr
 from project.evaluation.io import (
@@ -34,6 +40,7 @@ def evaluate(
     iou_thresholds: list[float],
     compute_map_metric: bool = True,
     match_threshold: float = 0.5,
+    cluster_map: dict[int, str] | None = None,
 ) -> tuple[list[dict], dict]:
     """
     Run evaluation across all images.
@@ -51,6 +58,15 @@ def evaluate(
         metrics. Below this threshold the GT is treated as not detected.
         Default 0.5.
     """
+    # A cluster-map is an evaluation decision that names anonymous clusters, so
+    # quality must be scored semantically against the named GT.
+    if cluster_map is not None:
+        if matching != "semantic":
+            logging.info(
+                "cluster-map provided: forcing semantic matching (was %r)", matching
+            )
+        matching = "semantic"
+
     match_fn = match_semantic if matching == "semantic" else match_greedy
 
     gt_stems = {d.name for d in gt_dir.iterdir() if d.is_dir()}
@@ -80,6 +96,13 @@ def evaluate(
         gt_masks = load_masks_from_dir(gt_dir / stem)
         pred_masks = load_masks_from_dir(pred_dir / stem)
         pred_scores = load_scores_from_dir(pred_dir / stem)
+
+        # Relabel on-disk predictions before any metric so quality, coverage,
+        # precision and mAP all see the named (or discarded) predictions.
+        if cluster_map is not None:
+            pred_masks, pred_scores = relabel_predictions(
+                pred_masks, pred_scores, cluster_map
+            )
 
         if not gt_masks:
             continue
@@ -174,6 +197,16 @@ def evaluate(
         summary["per_organ"][organ] = merged
 
     add_panoptic_quality(summary)
+
+    if cluster_map is not None:
+        # Record the evaluation-time mapping and which clusters were discarded
+        # (e.g. a Sunnybrook RV cavity reported as a validated discovery in ACDC).
+        summary["matching"] = "semantic"
+        summary["cluster_map"] = {str(cid): organ for cid, organ in cluster_map.items()}
+        summary["cluster_map_discarded"] = [
+            str(cid) for cid, organ in cluster_map.items() if organ == DISCARD_LABEL
+        ]
+
     return all_results, summary
 
 
@@ -190,7 +223,15 @@ def main() -> None:
                         help="Directory to save metrics.csv and summary.json")
     parser.add_argument("--matching", default="greedy",
                         choices=["semantic", "greedy"],
-                        help="Matching strategy for quality metrics")
+                        help="Matching strategy for quality metrics (ignored "
+                             "when --cluster-map is given, which forces semantic)")
+    parser.add_argument(
+        "--cluster-map", default=None,
+        help='Inline cluster ID -> organ mapping, e.g. '
+             '"0=heart 1=left_lung 2=right_lung 3=__discard__". This is an '
+             "evaluation decision: it relabels on-disk predictions and forces "
+             "semantic matching. Use __discard__ to exclude a cluster.",
+    )
     parser.add_argument(
         "--iou-thresholds", nargs="+", type=float,
         default=_DEFAULT_IOU_THRESHOLDS,
@@ -215,9 +256,12 @@ def main() -> None:
     if not pred_dir.is_dir():
         raise FileNotFoundError(f"Predictions directory not found: {pred_dir}")
 
+    cluster_map = parse_cluster_map(args.cluster_map) if args.cluster_map else None
+
     all_results, summary = evaluate(
         gt_dir, pred_dir, args.matching, args.iou_thresholds,
         match_threshold=args.match_threshold,
+        cluster_map=cluster_map,
     )
     save_results(all_results, summary, output_dir)
     print_summary(summary)
