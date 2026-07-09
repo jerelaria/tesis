@@ -229,13 +229,65 @@ def expand_metric_rows(variant_mode: str) -> list[tuple]:
 # LaTeX builders
 # ---------------------------------------------------------------------------
 
+# A method group: (group_label, [(col_label, summary_dict), ...]).
+# group_label="" means no top-level header for that group (e.g. Baseline).
+MethodGroup = tuple[str, list[tuple[str, dict]]]
+
+
+def _flat_methods(groups: list[MethodGroup]) -> list[tuple[str, dict]]:
+    return [(lbl, s) for _, grp in groups for lbl, s in grp]
+
+
+def _build_grouped_header(groups: list[MethodGroup],
+                          prefix_cols: list[str]) -> list[str]:
+    """
+    Return the LaTeX header lines for the given method groups.
+
+    If any group has a non-empty label, emits a two-level header:
+      line 1 - multicolumn spans for group labels
+      line 2 - cmidrule rules
+      line 3 - individual column labels
+    Otherwise emits a single flat header line.
+    """
+    has_groups = any(lbl for lbl, _ in groups)
+    n_prefix = len(prefix_cols)
+    flat_labels = [lbl for _, grp in groups for lbl, _ in grp]
+
+    if not has_groups:
+        return [" & ".join(prefix_cols + flat_labels) + r" \\"]
+
+    top: list[str] = [""] * n_prefix
+    cmidrules: list[str] = []
+    second: list[str] = list(prefix_cols)
+    col = n_prefix + 1  # 1-indexed LaTeX column number
+
+    for grp_lbl, grp_methods in groups:
+        n = len(grp_methods)
+        if grp_lbl:
+            span = rf"\multicolumn{{{n}}}{{c}}{{{grp_lbl}}}"
+            top.append(span)
+            cmidrules.append(rf"\cmidrule(lr){{{col}-{col + n - 1}}}")
+        else:
+            top.extend([""] * n)
+        for lbl, _ in grp_methods:
+            second.append(lbl)
+        col += n
+
+    return [
+        " & ".join(top) + r" \\",
+        " ".join(cmidrules),
+        " & ".join(second) + r" \\",
+    ]
+
+
 def build_organ_table(dataset: str, organs: list[str],
-                      methods: list[tuple[str, dict]], variant_mode: str,
+                      groups: list[MethodGroup], variant_mode: str,
                       thr: float, warnings: list[str]) -> str:
+    methods = _flat_methods(groups)
     metric_rows = expand_metric_rows(variant_mode)
     n_methods = len(methods)
     col_spec = "ll" + "r" * n_methods
-    head = " & ".join(["Órgano", "Métrica"] + [m[0] for m in methods]) + r" \\"
+    header_lines = _build_grouped_header(groups, ["Órgano", "Métrica"])
 
     lines = [
         r"\begin{table}[ht]",
@@ -246,7 +298,7 @@ def build_organ_table(dataset: str, organs: list[str],
         rf"\label{{tab:nosup_{dataset.lower()}}}",
         rf"\begin{{tabular}}{{{col_spec}}}",
         r"\toprule",
-        head,
+        *header_lines,
         r"\midrule",
     ]
 
@@ -274,12 +326,13 @@ def build_organ_table(dataset: str, organs: list[str],
     return "\n".join(lines)
 
 
-def build_global_table(dataset: str, methods: list[tuple[str, dict]],
-                      thr: float, warnings: list[str]) -> str:
+def build_global_table(dataset: str, groups: list[MethodGroup],
+                       thr: float, warnings: list[str]) -> str:
+    methods = _flat_methods(groups)
     panoptic = [(label, global_panoptic(s, thr, warnings)) for label, s in methods]
     n_methods = len(methods)
     col_spec = "l" + "r" * n_methods
-    head = " & ".join(["Métrica"] + [m[0] for m in methods]) + r" \\"
+    header_lines = _build_grouped_header(groups, ["Métrica"])
 
     # rows: PQ, SQ, RQ (panoptic), then global Dice and Recall for context
     metric_keys = [
@@ -296,7 +349,7 @@ def build_global_table(dataset: str, methods: list[tuple[str, dict]],
         rf"\label{{tab:nosup_global_{dataset.lower()}}}",
         rf"\begin{{tabular}}{{{col_spec}}}",
         r"\toprule",
-        head,
+        *header_lines,
         r"\midrule",
     ]
 
@@ -338,26 +391,69 @@ def write_csv(path: Path, dataset: str, organs: list[str],
 # Main
 # ---------------------------------------------------------------------------
 
-def default_methods(results_dir: Path, dataset: str, version: str,
-                    baseline_version: str) -> list[tuple[str, Path]]:
-    return [
-        ("Baseline",
-         results_dir / baseline_version / dataset / "unsup_baseline" / "summary.json"),
-        ("Prop. indep.",
-         results_dir / version / dataset / "unsup_hdbscan_propagation" / "summary.json"),
-        ("Prop. iter.",
-         results_dir / version / dataset / "unsup_hdbscan_propagation_iter" / "summary.json"),
+def default_method_groups(results_dir: Path, dataset: str,
+                          moments_version: str, baseline_version: str,
+                          embeddings_version: str | None) -> list[MethodGroup]:
+    baseline_path = (
+        results_dir / baseline_version / dataset / "unsup_baseline" / "summary.json"
+    )
+    moments_paths = [
+        ("Indep.",
+         results_dir / moments_version / dataset / "unsup_hdbscan_propagation" / "summary.json"),
+        ("Iter.",
+         results_dir / moments_version / dataset / "unsup_hdbscan_propagation_iter" / "summary.json"),
     ]
+    groups: list[MethodGroup] = [
+        ("", [("Baseline", baseline_path)]),
+        ("Momentos", moments_paths),
+    ]
+    if embeddings_version is not None:
+        emb_paths = [
+            ("Indep.",
+             results_dir / embeddings_version / dataset / "unsup_hdbscan_propagation" / "summary.json"),
+            ("Iter.",
+             results_dir / embeddings_version / dataset / "unsup_hdbscan_propagation_iter" / "summary.json"),
+        ]
+        groups.append(("Embeddings", emb_paths))
+    return groups
 
 
-def parse_method_overrides(raw: list[str]) -> list[tuple[str, Path]]:
-    out = []
+def _parse_group_args(results_dir: Path, dataset: str, raw: list[str],
+                      baseline_version: str) -> list[tuple[str, list[tuple[str, Path]]]]:
+    """
+    Parse --group 'LABEL=VERSION' tokens into groups with Indep./Iter. subcolumns,
+    prepended by a Baseline unlabeled group.
+    """
+    groups: list[tuple[str, list[tuple[str, Path]]]] = [
+        ("", [("Baseline",
+               results_dir / baseline_version / dataset / "unsup_baseline" / "summary.json")]),
+    ]
+    for token in raw:
+        if "=" not in token:
+            raise ValueError(f"--group expects LABEL=VERSION, got: {token!r}")
+        label, version = token.split("=", 1)
+        label, version = label.strip(), version.strip()
+        groups.append((label, [
+            ("Indep.",
+             results_dir / version / dataset / "unsup_hdbscan_propagation" / "summary.json"),
+            ("Iter.",
+             results_dir / version / dataset / "unsup_hdbscan_propagation_iter" / "summary.json"),
+        ]))
+    return groups
+
+
+def parse_method_overrides(raw: list[str]) -> list[tuple[str, list[tuple[str, Path]]]]:
+    """
+    Parse flat --method LABEL=PATH tokens into a single unnamed group so the
+    rest of the pipeline sees the standard groups structure.
+    """
+    flat: list[tuple[str, Path]] = []
     for token in raw:
         if "=" not in token:
             raise ValueError(f"--method expects LABEL=PATH, got: {token!r}")
         label, path = token.split("=", 1)
-        out.append((label.strip(), Path(path.strip())))
-    return out
+        flat.append((label.strip(), Path(path.strip())))
+    return [("", flat)]
 
 
 def main() -> None:
@@ -369,7 +465,10 @@ def main() -> None:
     ap.add_argument("--dataset", required=True,
                     help="Dataset short name, e.g. SunnybrookNicoSent or XRayNicoSent.")
     ap.add_argument("--version", default="moments",
-                    help="Feature version dir for the propagation experiments.")
+                    help="Feature version dir for the Momentos propagation experiments.")
+    ap.add_argument("--embeddings-version", default=None,
+                    help="Feature version dir for the Embeddings propagation experiments. "
+                         "When given, adds an Embeddings column group next to Momentos.")
     ap.add_argument("--baseline-version", default="baseline",
                     help="Version dir holding unsup_baseline.")
     ap.add_argument("--match-iou", type=float, default=0.1,
@@ -378,22 +477,33 @@ def main() -> None:
                     default="detected_only",
                     help="Which quality variant(s) to show for Dice/HD95/ASSD.")
     ap.add_argument("--method", action="append", default=[],
-                    help="Override a method as LABEL=path/to/summary.json. "
-                         "Repeatable; replaces the default three if given.")
+                    help="Override all methods as LABEL=path/to/summary.json. "
+                         "Repeatable; replaces the default groups if given (no grouping).")
+    ap.add_argument("--group", action="append", default=[],
+                    metavar="LABEL=VERSION",
+                    help="Add a column group with Indep./Iter. subcolumns from VERSION dir. "
+                         "Repeatable; replaces --version/--embeddings-version when given. "
+                         "Example: --group 'Emb. SAM2=embeddings' --group 'Emb. red.=embeddings_red'")
     ap.add_argument("--output-dir", type=Path, required=True)
     args = ap.parse_args()
 
     if args.method:
-        method_paths = parse_method_overrides(args.method)
+        raw_groups = parse_method_overrides(args.method)
+    elif args.group:
+        raw_groups = _parse_group_args(args.results_dir, args.dataset, args.group,
+                                       args.baseline_version)
     else:
-        method_paths = default_methods(
-            args.results_dir, args.dataset, args.version, args.baseline_version
+        raw_groups = default_method_groups(
+            args.results_dir, args.dataset,
+            args.version, args.baseline_version, args.embeddings_version,
         )
 
-    methods: list[tuple[str, dict]] = []
-    for label, path in method_paths:
-        methods.append((label, load_summary(path)))
+    groups: list[MethodGroup] = []
+    for grp_lbl, grp_paths in raw_groups:
+        loaded = [(lbl, load_summary(p)) for lbl, p in grp_paths]
+        groups.append((grp_lbl, loaded))
 
+    methods = _flat_methods(groups)
     organs = ordered_organs([s for _, s in methods])
     if not organs:
         print("ERROR: no organs found across summaries.", file=sys.stderr)
@@ -402,10 +512,10 @@ def main() -> None:
     warnings: list[str] = []
 
     organ_tex = build_organ_table(
-        args.dataset, organs, methods, args.variant, args.match_iou, warnings
+        args.dataset, organs, groups, args.variant, args.match_iou, warnings
     )
     global_tex = build_global_table(
-        args.dataset, methods, args.match_iou, warnings
+        args.dataset, groups, args.match_iou, warnings
     )
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -424,13 +534,8 @@ def main() -> None:
     print(f"Wrote: {tex_path}")
     print(f"Wrote: {csv_path}")
     print(f"Organs: {organs}")
-    print(f"Methods: {[m[0] for m in methods]}")
+    print(f"Groups: {[(lbl, [m for m, _ in grp]) for lbl, grp in groups]}")
     print(f"Match IoU: {args.match_iou:g}   Variant: {args.variant}")
-
-    if warnings:
-        print(f"\n{len(warnings)} warning(s) (cells left as '--'):")
-        for w in dict.fromkeys(warnings):  # de-duplicated, order-preserving
-            print(f"  - {w}")
 
 
 if __name__ == "__main__":

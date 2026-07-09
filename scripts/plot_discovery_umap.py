@@ -170,6 +170,10 @@ def main():
                     help="Organ to highlight (right ventricle by default). "
                          "The cluster(s) dominated by this organ are starred in "
                          "the left panel; the organ itself is starred in the right.")
+    ap.add_argument("--highlight-cluster", type=int, action="append", default=[],
+                    help="Cluster ID to highlight directly in the left panel, "
+                         "bypassing the GT-based lookup. Repeatable. "
+                         "Use when the organ has no GT (e.g. rv_cavity in Sunnybrook).")
     ap.add_argument("--output", required=True, type=Path,
                     help="Output PNG path.")
     args = ap.parse_args()
@@ -207,14 +211,18 @@ def main():
     xy = proj["umap"] if proj.get("umap") is not None else proj["pca"]
     method = "UMAP" if proj.get("umap") is not None else "PCA"
 
-    highlight_cl = _find_highlight_clusters(clusters, gt_organs, args.highlight_organ)
-    if highlight_cl:
-        print(f"  Highlighting cluster(s) {sorted(highlight_cl)} "
-              f"→ dominant organ '{args.highlight_organ}'")
+    if args.highlight_cluster:
+        highlight_cl = set(args.highlight_cluster)
+        print(f"  Highlighting cluster(s) {sorted(highlight_cl)} (explicit override)")
     else:
-        print(f"  No cluster dominantly labelled '{args.highlight_organ}' "
-              f"(organ absent from GT or below iou_min). "
-              f"Use --highlight-organ to change.")
+        highlight_cl = _find_highlight_clusters(clusters, gt_organs, args.highlight_organ)
+        if highlight_cl:
+            print(f"  Highlighting cluster(s) {sorted(highlight_cl)} "
+                  f"→ dominant organ '{args.highlight_organ}'")
+        else:
+            print(f"  No cluster dominantly labelled '{args.highlight_organ}' "
+                  f"(organ absent from GT or below iou_min). "
+                  f"Use --highlight-organ or --highlight-cluster to change.")
 
     fig, (ax_cl, ax_gt) = plt.subplots(1, 2, figsize=(13, 5.5))
 

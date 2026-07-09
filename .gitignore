@@ -62,3 +62,5 @@ Thumbs.db
 *.log
 tmp/
 .cache/
+
+mhg_workspace/

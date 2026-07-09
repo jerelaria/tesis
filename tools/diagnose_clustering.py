@@ -105,6 +105,11 @@ FEATURE_NAMES = [
 ]
 FEATURE_INDEX = {n: i for i, n in enumerate(FEATURE_NAMES)}
 
+# The 12 features actually used by the pipeline (excludes ecc, hu1, hu2, orientation).
+PIPELINE_SUBSET = ["V", "Cx", "Cy", "Dx", "Dy", "L",
+                   "solidity", "extent", "compact", "hu0",
+                   "intensity_mean", "intensity_std"]
+
 # Reduced geometric subset recommended for position/shape-only clustering.
 GEOM_SUBSET = ["V", "Cx", "Cy", "hu0", "solidity", "compact",
                "intensity_mean", "intensity_std"]
@@ -224,18 +229,25 @@ def assign_gt_organ(objects: dict, gt_dir: Path, iou_min: float) -> None:
 # Feature matrices
 # ---------------------------------------------------------------------------
 
-def build_feature_sets(objects: dict, ids: list, features_csv: Path | None) -> dict:
-    """Build feature matrices aligned to `ids`. Returns {set_name: X}."""
+def build_feature_sets(objects: dict, ids: list, features_csv: Path | None,
+                       standardize: bool = True) -> dict:
+    """Build feature matrices aligned to `ids`. Returns {set_name: X}.
+
+    standardize=False skips z-scoring for moments_all and embeddings_raw
+    (useful for ablation). as_clustered is never re-standardized because
+    the pipeline already outputs it standardized.
+    """
+    scale = _zscore if standardize else (lambda x: x)
     sets: dict = {}
 
     moments = np.stack([objects[i]["moments"] for i in ids])
-    sets["moments_all"] = _zscore(moments)
-    geom_idx = [FEATURE_INDEX[f] for f in GEOM_SUBSET]
-    sets["moments_geom"] = _zscore(moments[:, geom_idx])
+    sets["moments_all"] = scale(moments)
+    pipeline_idx = [FEATURE_INDEX[f] for f in PIPELINE_SUBSET]
+    sets["moments_12"] = scale(moments[:, pipeline_idx])
 
     if all(objects[i]["embedding"] is not None for i in ids):
         emb = np.stack([objects[i]["embedding"] for i in ids])
-        sets["embeddings_raw"] = _zscore(emb)
+        sets["embeddings_raw"] = scale(emb)
     else:
         logger.info("Embeddings missing for some objects -> skipping embeddings_raw")
 
@@ -530,6 +542,13 @@ def main():
                          "contingency), not the nominal dataset organ count.")
     ap.add_argument("--sweep", action="store_true",
                     help="Run the HDBSCAN parameter frontier sweep per feature set.")
+    ap.add_argument("--no-standardize", action="store_true",
+                    help="Skip z-score normalization for moments_all and embeddings_raw. "
+                         "Useful to ablate the effect of standardization. "
+                         "as_clustered is never re-standardized regardless of this flag.")
+    ap.add_argument("--dataset-name", default=None,
+                    help="Dataset name stored in the report metadata. "
+                         "Defaults to the gt-dir parent folder name if gt-dir is given.")
     args = ap.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -544,13 +563,23 @@ def main():
     else:
         gt = None
 
-    feature_sets = build_feature_sets(objects, ids, args.features_csv)
+    feature_sets = build_feature_sets(objects, ids, args.features_csv,
+                                      standardize=not args.no_standardize)
 
     default_over, per_set = parse_params(args.params)
     set_params = {name: resolve_set_params(name, default_over, per_set, len(ids))
                   for name in feature_sets}
 
-    report: dict = {"per_feature_set": {}}
+    dataset_name = (args.dataset_name
+                    or (args.gt_dir.parent.name if args.gt_dir else None)
+                    or "unknown")
+    report: dict = {
+        "meta": {
+            "dataset": dataset_name,
+            "standardized": not args.no_standardize,
+        },
+        "per_feature_set": {},
+    }
 
     for name, X in feature_sets.items():
         params = set_params[name]
