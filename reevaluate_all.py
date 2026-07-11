@@ -25,6 +25,10 @@ Usage
         --versions v1_baseline v3_extended \\
         --experiments unsup_hdbscan unsup_hdbscan_refine fs_iter_refine_1ref
 
+    # Evaluate the consolidated masks instead of the raw ones, but keep
+    # writing summary.json/metrics.csv in the usual experiment directory:
+    python reevaluate_all.py --pred-subdir masks_consolidated
+
     # Preview what would be re-evaluated without writing files:
     python reevaluate_all.py --dry-run
 
@@ -101,6 +105,14 @@ def main() -> None:
         help="Filter to these experiment names (default: all)",
     )
     parser.add_argument(
+        "--pred-subdir", default="masks",
+        help="Subdirectory under each experiment dir to read predictions "
+             "from (e.g. 'masks_consolidated'). The experiment is still "
+             "discovered by the presence of masks/, and outputs are still "
+             "written to the experiment dir itself, overwriting the "
+             "existing summary.json/metrics.csv there.",
+    )
+    parser.add_argument(
         "--match-threshold", type=float, default=0.5,
         help="IoU gate for quality matching: pairs below this threshold are "
              "demoted to missing (pred_name=None, Dice=0). Saved in summary.json.",
@@ -174,16 +186,22 @@ def main() -> None:
             for exp_dir in sorted(dataset_dir.iterdir()):
                 if not exp_dir.is_dir():
                     continue
-                masks_dir = exp_dir / "masks"
-                if not masks_dir.is_dir():
+                # masks/ presence is what marks this as a real experiment dir,
+                # even when predictions are actually read from --pred-subdir.
+                if not (exp_dir / "masks").is_dir():
                     continue
                 if args.experiments and exp_dir.name not in args.experiments:
+                    continue
+                pred_dir = exp_dir / args.pred_subdir
+                if not pred_dir.is_dir():
+                    print(f"  [SKIP] {version_dir.name}/{dataset_dir.name}/{exp_dir.name}: "
+                          f"missing {args.pred_subdir}/")
                     continue
                 triples.append((
                     version_dir.name,
                     dataset_dir.name,
                     exp_dir.name,
-                    masks_dir,       # pred_dir
+                    pred_dir,        # pred_dir
                     gt_dir,
                     exp_dir,         # output_dir (overwrites existing summary)
                 ))
