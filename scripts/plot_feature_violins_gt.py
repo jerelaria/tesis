@@ -55,6 +55,14 @@ ORGAN_COLORS = {
 }
 GRID_ROWS, GRID_COLS = 4, 4
 
+# Display-only relabeling (1-indexed hu moments for the reader), does not
+# affect the underlying feature identifiers used elsewhere in the pipeline.
+DISPLAY_NAMES = {"hu0": "hu1", "hu1": "hu2", "hu2": "hu3"}
+
+
+def _display_name(feat_name: str) -> str:
+    return DISPLAY_NAMES.get(feat_name, feat_name)
+
 
 def _organ_color(organ: str) -> str:
     return ORGAN_COLORS.get(organ, "#888888")
@@ -132,7 +140,7 @@ def main() -> None:
             [l.replace("_", "\n") for l in labels_for_plot],
             fontsize=7,
         )
-        ax.set_title(feat_name, fontsize=9,
+        ax.set_title(_display_name(feat_name), fontsize=9,
                      fontweight="bold",
                      color="#CC0000" if removed else "#000000")
 

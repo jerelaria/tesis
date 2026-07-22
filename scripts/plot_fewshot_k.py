@@ -78,6 +78,56 @@ _SUFFIX_LABELS = {None: "", "refine": " + refine", "baseline": " (baseline)"}
 # Canonical display order for rows
 _SUFFIX_ORDER  = [None, "refine", "baseline"]
 
+# ---------------------------------------------------------------------------
+# i18n
+# ---------------------------------------------------------------------------
+
+_MODE_LABELS_ES   = {"indep": "Independiente", "iter": "Iterativo"}
+_SUFFIX_LABELS_ES = {None: "", "refine": " + refinamiento", "baseline": " (baseline)"}
+
+_ORGAN_LABELS_ES = {
+    "heart": "corazón",
+    "left_lung": "pulmón izquierdo",
+    "right_lung": "pulmón derecho",
+    "lv_cavity": "cavidad VI",
+    "myocardium": "miocardio",
+    "rv_cavity": "cavidad VD",
+}
+
+_STRINGS = {
+    "en": {
+        "title": "Few-shot Dice vs K  |  {dataset_part}  |  {variant}",
+        "xlabel": "K (number of reference frames)",
+        "ylabel_detected": "Dice (detected only)",
+        "ylabel_missing": "Dice (with missing)",
+        "ref": "ref {val:.2f}",
+        "ref_legend": "{organ} ref = {val:.2f}",
+        "mode_labels": _MODE_LABELS,
+        "suffix_labels": _SUFFIX_LABELS,
+        "organ_labels": {},
+        "variant_labels": {},
+    },
+    "es": {
+        "title": "Dice few-shot vs K  |  {dataset_part}  |  {variant}",
+        "xlabel": "K (número de frames de referencia)",
+        "ylabel_detected": "Dice (solo detectados)",
+        "ylabel_missing": "Dice (con faltantes)",
+        "ref": "ref {val:.2f}",
+        "ref_legend": "{organ} ref = {val:.2f}",
+        "mode_labels": _MODE_LABELS_ES,
+        "suffix_labels": _SUFFIX_LABELS_ES,
+        "organ_labels": _ORGAN_LABELS_ES,
+        "variant_labels": {
+            "detected_only": "solo detectadas",
+            "with_missing": "con faltantes",
+        },
+    },
+}
+
+
+def _organ_label(organ: str, strings: dict) -> str:
+    return strings["organ_labels"].get(organ, organ)
+
 
 def parse_experiment_name(name: str) -> tuple[str, str | None, int]:
     """
@@ -181,6 +231,7 @@ def _ref_hlines(
     present_organs: list[str],
     ref_lines: dict[str, float],
     colors: dict[str, tuple],
+    strings: dict,
 ) -> None:
     """Draw horizontal dashed reference lines for organs present in the subplot."""
     for organ, val in ref_lines.items():
@@ -190,7 +241,7 @@ def _ref_hlines(
                    color=colors.get(organ, "gray"))
         # Right-edge annotation
         ax.annotate(
-            f"ref {val:.2f}",
+            strings["ref"].format(val=val),
             xy=(1, val), xycoords=("axes fraction", "data"),
             fontsize=7, va="bottom", ha="right", alpha=0.75,
             color=colors.get(organ, "gray"),
@@ -206,6 +257,7 @@ def _draw_lines_subplot(
     ref_lines: dict[str, float],
     ylabel: str,
     ylim: tuple[float, float],
+    strings: dict,
 ) -> None:
     for organ in all_organs:
         pairs = [(k, k_data[k][organ]) for k in all_k if organ in k_data.get(k, {})]
@@ -213,10 +265,10 @@ def _draw_lines_subplot(
             continue
         xs, ys = zip(*pairs)
         ax.plot(xs, ys, marker="o", linewidth=1.8, markersize=5,
-                label=organ, color=colors[organ])
+                label=_organ_label(organ, strings), color=colors[organ])
     ax.set_xticks(all_k)
-    ax.set_xlabel("K (number of reference frames)")
-    _ref_hlines(ax, all_organs, ref_lines, colors)
+    ax.set_xlabel(strings["xlabel"])
+    _ref_hlines(ax, all_organs, ref_lines, colors, strings)
     ax.set_ylabel(ylabel)
     ax.set_ylim(*ylim)
     ax.grid(axis="y", alpha=0.3)
@@ -231,15 +283,17 @@ def _draw_bars_subplot(
     ylabel: str,
     k: int,
     ylim: tuple[float, float],
+    strings: dict,
 ) -> None:
     present = [o for o in sorted(all_organs) if o in organ_dice]
     x = np.arange(len(present))
     ax.bar(x, [organ_dice[o] for o in present],
            color=[colors[o] for o in present], alpha=0.85, width=0.55)
     ax.set_xticks(x)
-    ax.set_xticklabels(present, rotation=20, ha="right", fontsize=9)
+    ax.set_xticklabels([_organ_label(o, strings) for o in present],
+                        rotation=20, ha="right", fontsize=9)
     ax.set_xlabel(f"K = {k}")
-    _ref_hlines(ax, present, ref_lines, colors)
+    _ref_hlines(ax, present, ref_lines, colors, strings)
     ax.set_ylabel(ylabel)
     ax.set_ylim(*ylim)
     ax.grid(axis="y", alpha=0.3)
@@ -253,6 +307,7 @@ def _fill_subplot(
     ref_lines: dict[str, float],
     ylabel: str,
     ylim: tuple[float, float],
+    strings: dict,
 ) -> None:
     if not k_data:
         ax.set_visible(False)
@@ -260,10 +315,10 @@ def _fill_subplot(
     all_k = sorted(k_data)
     if len(all_k) == 1:
         _draw_bars_subplot(ax, k_data[all_k[0]], all_organs, colors,
-                           ref_lines, ylabel, all_k[0], ylim)
+                           ref_lines, ylabel, all_k[0], ylim, strings)
     else:
         _draw_lines_subplot(ax, all_k, k_data, all_organs, colors,
-                            ref_lines, ylabel, ylim)
+                            ref_lines, ylabel, ylim, strings)
 
 
 def _compute_ylim(
@@ -301,6 +356,7 @@ def build_figure(
     ref_lines: dict[str, float],
     title: str,
     ylim: tuple[float, float] | None = None,
+    lang: str = "en",
 ) -> plt.Figure:
     """
     Assemble the full figure from loaded data.
@@ -308,6 +364,7 @@ def build_figure(
     Layout: columns = modes present (indep before iter), rows = suffixes present
     (None → refine → baseline, in that order).
     """
+    strings = _STRINGS[lang]
     modes   = [m for m in ("indep", "iter") if any(k[0] == m for k in data)]
     suffixes = [s for s in _SUFFIX_ORDER if any(k[1] == s for k in data)]
 
@@ -321,8 +378,8 @@ def build_figure(
         for o in kd
     })
     colors = _organ_colors(all_organs)
-    ylabel = ("Dice (detected only)"
-              if variant == "detected_only" else "Dice (with missing)")
+    ylabel = (strings["ylabel_detected"]
+              if variant == "detected_only" else strings["ylabel_missing"])
     if ylim is None:
         ylim = _compute_ylim(data, ref_lines)
 
@@ -334,22 +391,24 @@ def build_figure(
     for row, suffix in enumerate(suffixes):
         for col, mode in enumerate(modes):
             ax = axes[row][col]
-            label = _MODE_LABELS[mode] + _SUFFIX_LABELS.get(suffix, f" ({suffix})")
+            label = strings["mode_labels"][mode] + strings["suffix_labels"].get(suffix, f" ({suffix})")
             ax.set_title(label, fontsize=10, fontweight="bold")
             _fill_subplot(ax, data.get((mode, suffix), {}),
-                          all_organs, colors, ref_lines, ylabel, ylim)
+                          all_organs, colors, ref_lines, ylabel, ylim, strings)
 
     # Figure-level legend: organ lines (solid) + reference lines (dashed)
     handles = [
         mlines.Line2D([], [], color=colors[o], marker="o",
-                      linewidth=1.8, markersize=5, label=o)
+                      linewidth=1.8, markersize=5, label=_organ_label(o, strings))
         for o in all_organs
     ]
     for organ, val in ref_lines.items():
         if organ in colors:
             handles.append(
                 mlines.Line2D([], [], color=colors[organ], linestyle="--",
-                              linewidth=1.1, label=f"{organ} ref = {val:.2f}")
+                              linewidth=1.1,
+                              label=strings["ref_legend"].format(
+                                  organ=_organ_label(organ, strings), val=val))
             )
 
     if handles:
@@ -399,6 +458,18 @@ def main() -> None:
             "If omitted, limits are auto-fitted tightly to the data."
         ),
     )
+    parser.add_argument(
+        "--lang", default="en", choices=["en", "es"],
+        help="Language for all figure text (titles, axes, legend).",
+    )
+    parser.add_argument(
+        "--dataset-label", default=None,
+        help="Display name for the dataset in the title (default: results-dir folder name).",
+    )
+    parser.add_argument(
+        "--hide-version", action="store_true",
+        help="Omit the 'version/' prefix (results-dir parent folder name) from the title.",
+    )
     args = parser.parse_args()
 
     if not args.results_dir.is_dir():
@@ -412,12 +483,14 @@ def main() -> None:
 
     ref_lines = parse_reference_lines(args.reference_lines)
 
-    dataset  = args.results_dir.name
-    version  = args.results_dir.parent.name
-    title    = f"Few-shot Dice vs K  |  {version}/{dataset}  |  {args.variant}"
+    dataset  = args.dataset_label or args.results_dir.name
+    dataset_part = dataset if args.hide_version else f"{args.results_dir.parent.name}/{dataset}"
+    variant_label = _STRINGS[args.lang]["variant_labels"].get(args.variant, args.variant)
+    title    = _STRINGS[args.lang]["title"].format(
+        dataset_part=dataset_part, variant=variant_label)
 
     ylim = tuple(args.ylim) if args.ylim is not None else None
-    fig = build_figure(data, args.variant, ref_lines, title, ylim)
+    fig = build_figure(data, args.variant, ref_lines, title, ylim, lang=args.lang)
 
     args.output.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(args.output, dpi=150, bbox_inches="tight")
